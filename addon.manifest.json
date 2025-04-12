@@ -1,0 +1,38 @@
+{
+    "version": 1,
+    "name": "GHL to ServiceM8 Integration",
+    "description": "Sync leads and jobs between GoHighLevel and ServiceM8. Automatically create jobs when a quote is accepted, and trigger GHL workflows after payment.",
+    "function": {
+      "type": "self_hosted_web_service",
+      "url": "https://7b8c-2404-3100-1887-89fe-3190-9cd6-1bf1-2488.ngrok-free.app/servicem8-job-updated"
+    },
+    "authentication": {
+      "type": "oauth",
+      "client_id": "747959",
+      "client_secret": "975ab97c9e1c49569b8722a3fe3728fb",
+      "authorization_url": "https://go.servicem8.com/api_oauth/authorize",
+      "token_url": "https://api.servicem8.com/api_oauth/token",
+      "callback_url": "https://7b8c-2404-3100-1887-89fe-3190-9cd6-1bf1-2488.ngrok-free.app/oauth/callback",
+      "scope": "staff job client"
+    },
+    "webhooks": [
+      {
+        "object": "job",
+        "event": "updated",
+        "url": "https://7b8c-2404-3100-1887-89fe-3190-9cd6-1bf1-2488.ngrok-free.app/servicem8-job-updated",
+        "format": "json",
+        "fields": ["uuid", "status"]
+      },
+      {
+        "object": "job",
+        "event": "invoiced",
+        "url": "https://7b8c-2404-3100-1887-89fe-3190-9cd6-1bf1-2488.ngrok-free.app/servicem8-job-paid",
+        "format": "json",
+        "fields": ["uuid", "status"]
+      }
+    ],
+    "integration": {
+      "type": "external"
+    }
+  }
+  
