@@ -25,6 +25,7 @@ app.get('/activate-addon', (req, res) => {
 
 // OAuth Callback
 app.get('/oauth/callback', async (req, res) => {
+  console.log('OAuth callback query:', req.query);
   const { code } = req.query;
   if (!code) return res.status(400).send('Missing authorization code');
 
