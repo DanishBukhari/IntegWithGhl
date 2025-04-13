@@ -17,7 +17,9 @@ let SERVICE_M8_ACCESS_TOKEN = null;
 
 // Add-on Activation
 app.get('/activate-addon', (req, res) => {
-  const redirectUrl = `https://go.servicem8.com/api_oauth/authorize?client_id=${SERVICE_M8_CLIENT_ID}&redirect_uri=https://integwithghl-0125ea6b2dc5.herokuapp.com/oauth/callback&response_type=code&scope=staff%20job%20client%20invoice`;
+  const redirectUri = encodeURIComponent('https://integwithghl-0125ea6b2dc5.herokuapp.com/oauth/callback');
+  const scope = encodeURIComponent('staff job client invoice');
+  const redirectUrl = `https://go.servicem8.com/api_oauth/authorize?client_id=${SERVICE_M8_CLIENT_ID}&redirect_uri=${redirectUri}&response_type=code&scope=${scope}`;
   res.redirect(redirectUrl);
 });
 
@@ -117,7 +119,6 @@ async function checkInvoiceStatus(jobUuid) {
     for (const invoice of invoices) {
       if (invoice.status === 'Paid') {
         console.log('Found paid invoice for job:', jobUuid);
-        await trigger 
         // Get client email to find GHL contact
         const jobResponse = await axios.get(`https://api.servicem8.com/api_1.0/job/${jobUuid}.json`, {
           headers: { Authorization: `Bearer ${SERVICE_M8_ACCESS_TOKEN}` },
