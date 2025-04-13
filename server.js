@@ -9,8 +9,8 @@ const PORT = process.env.PORT || 3000;
 app.use(bodyParser.json());
 
 // Configuration
-const SERVICE_M8_CLIENT_ID = '747959';
-const SERVICE_M8_CLIENT_SECRET = '975ab97c9e1c49569b8722a3fe3728fb';
+const SERVICE_M8_CLIENT_ID = '894691';
+const SERVICE_M8_CLIENT_SECRET = 'a4902edb4f674509aaaa22a46b49015b';
 const GHL_API_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJsb2NhdGlvbl9pZCI6InBscTVQM1lrbzFOOURESzUwMVUyIiwidmVyc2lvbiI6MSwiaWF0IjoxNzIyNDE0NTkyNTI5LCJzdWIiOiIzRml4Mmt2UVVtUURrUTlhclEzSiJ9.w_6KY5758i_sTtWBNyygkgKRIFBGcbpAfKlFSD7-57w';
 const GHL_WEBHOOK_URL = 'YOUR_GHL_WEBHOOK_URL'; // Replace after creating Workflow 2
 let SERVICE_M8_ACCESS_TOKEN = null;

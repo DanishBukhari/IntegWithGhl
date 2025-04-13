@@ -8,8 +8,8 @@
   },
   "authentication": {
     "type": "oauth",
-    "client_id": "747959",
-    "client_secret": "975ab97c9e1c49569b8722a3fe3728fb",
+    "client_id": "894691",
+    "client_secret": "a4902edb4f674509aaaa22a46b49015b",
     "authorization_url": "https://go.servicem8.com/api_oauth/authorize",
     "token_url": "https://api.servicem8.com/api_oauth/token",
     "callback_url": "https://integwithghl-0125ea6b2dc5.herokuapp.com/oauth/callback",
