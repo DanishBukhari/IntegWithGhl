@@ -4,7 +4,7 @@
   "description": "Sync leads and jobs between GoHighLevel and ServiceM8. Automatically create jobs when a quote is accepted, and trigger GHL workflows after payment.",
   "function": {
     "type": "self_hosted_web_service",
-    "url": "https://integwithghl-0125ea6b2dc5.herokuapp.com/servicem8-job-updated"
+    "url": "https://integwithghl-0125ea6b2dc5.herokuapp.com"
   },
   "authentication": {
     "type": "oauth",
@@ -13,20 +13,13 @@
     "authorization_url": "https://go.servicem8.com/api_oauth/authorize",
     "token_url": "https://api.servicem8.com/api_oauth/token",
     "callback_url": "https://integwithghl-0125ea6b2dc5.herokuapp.com/oauth/callback",
-    "scope": "staff job client"
+    "scope": "staff job client invoice"
   },
   "webhooks": [
     {
       "object": "job",
       "event": "updated",
       "url": "https://integwithghl-0125ea6b2dc5.herokuapp.com/servicem8-job-updated",
-      "format": "json",
-      "fields": ["uuid", "status"]
-    },
-    {
-      "object": "job",
-      "event": "invoiced",
-      "url": "https://integwithghl-0125ea6b2dc5.herokuapp.com/servicem8-job-paid",
       "format": "json",
       "fields": ["uuid", "status"]
     }
