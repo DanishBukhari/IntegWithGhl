@@ -49,9 +49,29 @@ app.post('/ghl-create-job', async (req, res) => {
     if (matchingCompany) {
       // Client exists, reuse it
       companyUuid = matchingCompany.uuid;
-      console.log(`Client found: ${companyUuid} for name ${clientName}`);
+      console.log(`Client found: ${companyUuid} for name ${clientName}, email: ${matchingCompany.email}, phone: ${matchingCompany.mobile}`);
+      // Optionally update existing client's email and phone if they differ
+      if (matchingCompany.email !== email || matchingCompany.mobile !== phone) {
+        console.log(`Updating client ${companyUuid} with new email ${email} and phone ${phone}`);
+        await axios.put(
+          `https://api.servicem8.com/api_1.0/company/${companyUuid}.json`,
+          {
+            email: email,
+            mobile: phone || ''
+          },
+          {
+            headers: {
+              Authorization: authHeader,
+              'Content-Type': 'application/json',
+              Accept: 'application/json'
+            }
+          }
+        );
+        console.log(`Client ${companyUuid} updated`);
+      }
     } else {
       // Step 3: Create a new client in ServiceM8 with email and phone
+      console.log(`Creating new client with name ${clientName}, email ${email}, phone ${phone}`);
       const newCompanyResponse = await axios.post(
         'https://api.servicem8.com/api_1.0/company.json',
         {
@@ -150,7 +170,8 @@ const checkPaymentStatus = async () => {
       if (payments.length > 0) {
         // Payment exists, assume the job is paid
         const payment = payments[0];
-        console.log(`Payment found for job ${jobUuid}: Amount ${payment.amount}, Date ${payment.payment_date}`);
+        const paymentDate = payment.date_paid || payment.payment_date || 'not available';
+        console.log(`Payment found for job ${jobUuid}: Amount ${payment.amount}, Date ${paymentDate}`);
 
         // Fetch the company details to get the email
         const companyResponse = await axios.get(`https://api.servicem8.com/api_1.0/company/${job.company_uuid}.json`, {
@@ -161,25 +182,24 @@ const checkPaymentStatus = async () => {
         });
 
         const company = companyResponse.data;
-        const clientEmail = (company.email || '').trim().toLowerCase();
+        const clientEmail = (company.email || company.company_email || '').trim().toLowerCase(); // Try alternate field name
         console.log(`Fetched company email for job ${jobUuid}: ${clientEmail}`);
 
         if (!clientEmail) {
-          console.log(`No email found for company ${job.company_uuid}, skipping webhook trigger.`);
-          continue;
+          console.log(`No email found for company ${job.company_uuid}, attempting to use GHL Contact ID`);
         }
 
         // Extract GHL Contact ID from job description
         const ghlContactIdMatch = job.description.match(/GHL Contact ID: (\S+)/);
         const ghlContactId = ghlContactIdMatch ? ghlContactIdMatch[1] : '';
 
-        // Trigger GHL webhook (Workflow 2)
+        // Trigger GHL webhook (Workflow 2) even if email is missing, relying on ghlContactId
         console.log(`Triggering GHL webhook for job ${jobUuid} with clientEmail: ${clientEmail} and ghlContactId: ${ghlContactId}`);
         await axios.post(
           GHL_WEBHOOK_URL,
           {
             jobUuid: jobUuid,
-            clientEmail: clientEmail,
+            clientEmail: clientEmail || '',
             ghlContactId: ghlContactId,
             status: 'Invoice Paid'
           },
