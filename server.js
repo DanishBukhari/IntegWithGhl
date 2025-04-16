@@ -30,26 +30,27 @@ app.post('/ghl-create-job', async (req, res) => {
       return res.status(400).json({ error: 'Missing required fields' });
     }
 
-    // Step 1: Check if client exists in ServiceM8 by email
+    // Step 1: Fetch all companies from ServiceM8
     const companiesResponse = await axios.get('https://api.servicem8.com/api_1.0/company.json', {
       headers: {
         Authorization: authHeader,
         Accept: 'application/json'
-      },
-      params: {
-        '$filter': `email eq '${email}'`
       }
     });
 
-    let companyUuid;
     const companies = companiesResponse.data;
+    console.log(`Fetched ${companies.length} companies from ServiceM8`);
 
-    if (companies.length > 0) {
+    // Step 2: Search for a company with the matching email
+    let companyUuid;
+    const matchingCompany = companies.find(company => company.email && company.email.toLowerCase() === email.toLowerCase());
+
+    if (matchingCompany) {
       // Client exists
-      companyUuid = companies[0].uuid;
-      console.log(`Client found: ${companyUuid}`);
+      companyUuid = matchingCompany.uuid;
+      console.log(`Client found: ${companyUuid} for email ${email}`);
     } else {
-      // Step 2: Create a new client in ServiceM8
+      // Step 3: Create a new client in ServiceM8
       const newCompanyResponse = await axios.post(
         'https://api.servicem8.com/api_1.0/company.json',
         {
@@ -69,10 +70,10 @@ app.post('/ghl-create-job', async (req, res) => {
       );
 
       companyUuid = newCompanyResponse.headers['x-record-uuid'];
-      console.log(`Client created: ${companyUuid}`);
+      console.log(`Client created: ${companyUuid} for email ${email}`);
     }
 
-    // Step 3: Create a job in ServiceM8
+    // Step 4: Create a job in ServiceM8
     const jobResponse = await axios.post(
       'https://api.servicem8.com/api_1.0/job.json',
       {
