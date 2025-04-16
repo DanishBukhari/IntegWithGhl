@@ -16,19 +16,18 @@ const GHL_API_KEY =
 const GHL_WEBHOOK_URL = "YOUR_GHL_WEBHOOK_URL"; // Replace after creating Workflow 2
 let SERVICE_M8_ACCESS_TOKEN = null;
 
-const querystring = require("querystring");
+const querystring = require('querystring');
 
-app.get("/activate-addon", (req, res) => {
+app.get('/activate-addon', (req, res) => {
   const queryParams = querystring.stringify({
     client_id: SERVICE_M8_CLIENT_ID,
-    redirect_uri:
-      "https://integwithghl-0125ea6b2dc5.herokuapp.com/oauth/callback",
-    response_type: "code",
-    scope:
-      "read_staff read_jobs create_jobs manage_jobs read_clients manage_clients read_invoices",
+    redirect_uri: 'https://integwithghl-0125ea6b2dc5.herokuapp.com/oauth/callback',
+    response_type: 'code',
+    scope: 'read_staff read_jobs create_jobs manage_jobs read_customers manage_customers read_invoices'
   });
   const redirectUrl = `https://go.servicem8.com/api_oauth/authorize?${queryParams}`;
-  res.redirect(redirectUrl);
+  console.log('Redirecting to:', redirectUrl); // Log the URL for debugging
+  res.status(302).set('Location', redirectUrl).end();
 });
 
 // OAuth Callback
