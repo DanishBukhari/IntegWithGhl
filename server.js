@@ -1,228 +1,176 @@
-const express = require("express");
-const axios = require("axios");
-const bodyParser = require("body-parser");
+const express = require('express');
+const axios = require('axios');
+const cron = require('node-cron');
+const dotenv = require('dotenv');
+
+dotenv.config();
 
 const app = express();
+app.use(express.json());
+
+const SERVICE_M8_USERNAME = process.env.SERVICE_M8_USERNAME;
+const SERVICE_M8_PASSWORD = process.env.SERVICE_M8_PASSWORD;
+const GHL_API_KEY = process.env.GHL_API_KEY;
+const GHL_WEBHOOK_URL = process.env.GHL_WEBHOOK_URL;
 const PORT = process.env.PORT || 3000;
 
-// Middleware
-app.use(bodyParser.json());
+// Base64 encode credentials for HTTP Basic Auth
+const authHeader = 'Basic ' + Buffer.from(`${SERVICE_M8_USERNAME}:${SERVICE_M8_PASSWORD}`).toString('base64');
 
-// Configuration
-const SERVICE_M8_CLIENT_ID = "114073";
-const SERVICE_M8_CLIENT_SECRET = "8de499e43092434dbd1122a46d07ca8b";
-const GHL_API_KEY =
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJsb2NhdGlvbl9pZCI6InBscTVQM1lrbzFOOURESzUwMVUyIiwidmVyc2lvbiI6MSwiaWF0IjoxNzIyNDE0NTkyNTI5LCJzdWIiOiIzRml4Mmt2UVVtUURrUTlhclEzSiJ9.w_6KY5758i_sTtWBNyygkgKRIFBGcbpAfKlFSD7-57w";
-const GHL_WEBHOOK_URL = "YOUR_GHL_WEBHOOK_URL"; // Replace after creating Workflow 2
-let SERVICE_M8_ACCESS_TOKEN = null;
+// Store processed job UUIDs to avoid duplicate triggers
+const processedJobs = new Set();
 
-const querystring = require('querystring');
-
-app.get('/activate-addon', (req, res) => {
-  const queryParams = querystring.stringify({
-    client_id: SERVICE_M8_CLIENT_ID,
-    redirect_uri: 'https://integwithghl-0125ea6b2dc5.herokuapp.com/oauth/callback',
-    response_type: 'code',
-    scope: 'read_staff read_jobs create_jobs manage_jobs read_customers manage_customers read_invoices'
-  });
-  const redirectUrl = `https://go.servicem8.com/api_oauth/authorize?${queryParams}`;
-  console.log('Redirecting to:', redirectUrl); // Log the URL for debugging
-  res.status(302).set('Location', redirectUrl).end();
-});
-
-// OAuth Callback
-app.get("/oauth/callback", async (req, res) => {
-  console.log("OAuth callback query:", req.query);
-  const { code } = req.query;
-  if (!code) return res.status(400).send("Missing authorization code");
-
+// Endpoint for GHL to create a job in ServiceM8 (Workflow 1)
+app.post('/ghl-create-job', async (req, res) => {
   try {
-    const response = await axios.post(
-      "https://api.servicem8.com/api_oauth/token",
-      null,
-      {
-        params: {
-          code,
-          client_id: SERVICE_M8_CLIENT_ID,
-          client_secret: SERVICE_M8_CLIENT_SECRET,
-          grant_type: "authorization_code",
-          redirect_uri:
-            "https://integwithghl-0125ea6b2dc5.herokuapp.com/oauth/callback",
-        },
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    const { firstName, lastName, email, phone, address, jobDescription } = req.body;
+
+    // Validate request
+    if (!firstName || !lastName || !email || !phone || !address || !jobDescription) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    // Step 1: Check if client exists in ServiceM8 by email
+    const clientsResponse = await axios.get('https://api.servicem8.com/api_1.0/client.json', {
+      headers: {
+        Authorization: authHeader,
+        Accept: 'application/json'
+      },
+      params: {
+        '$filter': `email eq '${email}'`
       }
-    );
+    });
 
-    SERVICE_M8_ACCESS_TOKEN = response.data.access_token;
-    console.log("ServiceM8 OAuth token:", SERVICE_M8_ACCESS_TOKEN);
-    res.send("OAuth successful! Integration active.");
-  } catch (err) {
-    console.error("OAuth error:", err.response?.data || err.message);
-    res.status(500).send("OAuth failed");
-  }
-});
+    let clientUuid;
+    const clients = clientsResponse.data;
 
-// GHL to ServiceM8: Create Job
-app.post("/ghl-create-job", async (req, res) => {
-  const { contactId, firstName, lastName, email, phone, jobDescription } =
-    req.body;
-
-  if (!SERVICE_M8_ACCESS_TOKEN)
-    return res.status(401).send("ServiceM8 not authenticated");
-
-  try {
-    // Check for existing client
-    let clientUuid = null;
-    const clientResponse = await axios.get(
-      "https://api.servicem8.com/api_1.0/client.json",
-      {
-        headers: { Authorization: `Bearer ${SERVICE_M8_ACCESS_TOKEN}` },
-        params: { $filter: `email eq '${email}'` },
-      }
-    );
-
-    if (clientResponse.data.length > 0) {
-      clientUuid = clientResponse.data[0].uuid;
-      console.log("Found client:", clientUuid);
+    if (clients.length > 0) {
+      // Client exists
+      clientUuid = clients[0].uuid;
+      console.log(`Client found: ${clientUuid}`);
     } else {
-      const newClient = await axios.post(
-        "https://api.servicem8.com/api_1.0/client.json",
+      // Step 2: Create a new client in ServiceM8
+      const newClientResponse = await axios.post(
+        'https://api.servicem8.com/api_1.0/client.json',
         {
           first_name: firstName,
           last_name: lastName,
-          email,
+          email: email,
           mobile: phone,
-          active: 1,
+          billing_address: address
         },
         {
           headers: {
-            Authorization: `Bearer ${SERVICE_M8_ACCESS_TOKEN}`,
-            "Content-Type": "application/json",
-          },
+            Authorization: authHeader,
+            'Content-Type': 'application/json',
+            Accept: 'application/json'
+          }
         }
       );
-      clientUuid = newClient.data.uuid;
-      console.log("Created client:", clientUuid);
+
+      clientUuid = newClientResponse.headers['x-record-uuid'];
+      console.log(`Client created: ${clientUuid}`);
     }
 
-    // Create job
+    // Step 3: Create a job in ServiceM8
     const jobResponse = await axios.post(
-      "https://api.servicem8.com/api_1.0/job.json",
+      'https://api.servicem8.com/api_1.0/job.json',
       {
         company_uuid: clientUuid,
-        job_description: jobDescription || "Job from GHL",
-        status: "Quote",
-        active: 1,
+        description: jobDescription,
+        status: 'Quote'
       },
       {
         headers: {
-          Authorization: `Bearer ${SERVICE_M8_ACCESS_TOKEN}`,
-          "Content-Type": "application/json",
-        },
+          Authorization: authHeader,
+          'Content-Type': 'application/json',
+          Accept: 'application/json'
+        }
       }
     );
 
-    console.log("Created job:", jobResponse.data.uuid);
-    res.status(200).json({ jobUuid: jobResponse.data.uuid });
+    const jobUuid = jobResponse.headers['x-record-uuid'];
+    console.log(`Job created: ${jobUuid}`);
+
+    res.status(200).json({ message: 'Job created successfully', jobUuid });
   } catch (error) {
-    console.error("Error creating job:", error.response?.data || error.message);
-    res.status(500).send("Failed to create job");
+    console.error('Error creating job:', error.response ? error.response.data : error.message);
+    res.status(500).json({ error: 'Failed to create job' });
   }
 });
 
-// ServiceM8 Webhook: Job Updated
-app.post("/servicem8-job-updated", async (req, res) => {
-  const { uuid, status } = req.body;
-  console.log("Job Updated:", uuid, status);
-
-  if (status === "Completed") {
-    try {
-      await checkInvoiceStatus(uuid);
-    } catch (error) {
-      console.error(
-        "Error processing job updated:",
-        error.response?.data || error.message
-      );
-    }
-  }
-  res.sendStatus(200);
-});
-
-// Check Invoice Status for Paid Jobs
-async function checkInvoiceStatus(jobUuid) {
+// Function to check invoice status and trigger GHL webhook
+const checkInvoiceStatus = async () => {
   try {
-    // Get invoices for the job
-    const invoiceResponse = await axios.get(
-      "https://api.servicem8.com/api_1.0/invoice.json",
-      {
-        headers: { Authorization: `Bearer ${SERVICE_M8_ACCESS_TOKEN}` },
-        params: { $filter: `job_uuid eq '${jobUuid}'` },
+    // Fetch all jobs with status 'Completed'
+    const jobsResponse = await axios.get('https://api.servicem8.com/api_1.0/job.json', {
+      headers: {
+        Authorization: authHeader,
+        Accept: 'application/json'
+      },
+      params: {
+        '$filter': "status eq 'Completed'"
       }
-    );
+    });
 
-    const invoices = invoiceResponse.data;
-    for (const invoice of invoices) {
-      if (invoice.status === "Paid") {
-        console.log("Found paid invoice for job:", jobUuid);
-        // Get client email to find GHL contact
-        const jobResponse = await axios.get(
-          `https://api.servicem8.com/api_1.0/job/${jobUuid}.json`,
-          {
-            headers: { Authorization: `Bearer ${SERVICE_M8_ACCESS_TOKEN}` },
-          }
-        );
-        const clientUuid = jobResponse.data.company_uuid;
-        const clientResponse = await axios.get(
-          `https://api.servicem8.com/api_1.0/client/${clientUuid}.json`,
-          {
-            headers: { Authorization: `Bearer ${SERVICE_M8_ACCESS_TOKEN}` },
-          }
-        );
-        const email = clientResponse.data.email;
+    const jobs = jobsResponse.data;
 
-        // Find GHL contact
-        const ghlContactResponse = await axios.get(
-          "https://rest.gohighlevel.com/v1/contacts/",
-          {
-            headers: { Authorization: `Bearer ${GHL_API_KEY}` },
-            params: { query: email },
-          }
-        );
+    for (const job of jobs) {
+      const jobUuid = job.uuid;
 
-        const contact = ghlContactResponse.data.contacts[0];
-        if (contact) {
-          await triggerGHLReviewRequest(contact.id);
-        } else {
-          console.log("No GHL contact found for email:", email);
+      // Skip if already processed
+      if (processedJobs.has(jobUuid)) {
+        continue;
+      }
+
+      // Fetch invoices for the job
+      const invoicesResponse = await axios.get('https://api.servicem8.com/api_1.0/invoice.json', {
+        headers: {
+          Authorization: authHeader,
+          Accept: 'application/json'
+        },
+        params: {
+          '$filter': `job_uuid eq '${jobUuid}'`
+        }
+      });
+
+      const invoices = invoicesResponse.data;
+
+      if (invoices.length > 0) {
+        const invoice = invoices[0];
+        if (invoice.status === 'Paid') {
+          // Invoice is paid, trigger GHL webhook (Workflow 2)
+          await axios.post(
+            GHL_WEBHOOK_URL,
+            {
+              jobUuid: jobUuid,
+              clientEmail: job.company_email,
+              status: 'Invoice Paid'
+            },
+            {
+              headers: {
+                Authorization: `Bearer ${GHL_API_KEY}`,
+                'Content-Type': 'application/json'
+              }
+            }
+          );
+
+          console.log(`Triggered GHL webhook for job ${jobUuid}`);
+          processedJobs.add(jobUuid); // Mark as processed
         }
       }
     }
   } catch (error) {
-    console.error(
-      "Error checking invoice status:",
-      error.response?.data || error.message
-    );
+    console.error('Error checking invoice status:', error.response ? error.response.data : error.message);
   }
-}
+};
 
-// Trigger GHL Review Request
-async function triggerGHLReviewRequest(contactId) {
-  try {
-    const response = await axios.post(
-      GHL_WEBHOOK_URL,
-      { contactId },
-      { headers: { "Content-Type": "application/json" } }
-    );
-    console.log("Triggered GHL Webhook:", response.data);
-  } catch (error) {
-    console.error(
-      "Error triggering GHL webhook:",
-      error.response?.data || error.message
-    );
-  }
-}
+// Schedule polling every 5 minutes
+cron.schedule('*/5 * * * *', () => {
+  console.log('Polling ServiceM8 for completed jobs and paid invoices...');
+  checkInvoiceStatus();
+});
 
-// Start Server
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
