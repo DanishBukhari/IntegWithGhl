@@ -133,8 +133,7 @@ const checkInvoiceStatus = async () => {
       });
 
       const invoices = invoicesResponse.data;
-      
-
+      // Rest of the code..
       if (invoices.length > 0) {
         const invoice = invoices[0];
         if (invoice.status === 'Paid') {
@@ -158,8 +157,6 @@ const checkInvoiceStatus = async () => {
           processedJobs.add(jobUuid); // Mark as processed
         }
       }
-    
-      // Rest of the code...
     }
   } catch (error) {
     console.error('Error checking invoice status:', error.response ? error.response.data : error.message);
