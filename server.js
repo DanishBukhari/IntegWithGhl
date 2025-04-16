@@ -133,6 +133,32 @@ const checkInvoiceStatus = async () => {
       });
 
       const invoices = invoicesResponse.data;
+      
+
+      if (invoices.length > 0) {
+        const invoice = invoices[0];
+        if (invoice.status === 'Paid') {
+          // Invoice is paid, trigger GHL webhook (Workflow 2)
+          await axios.post(
+            GHL_WEBHOOK_URL,
+            {
+              jobUuid: jobUuid,
+              clientEmail: job.company_email,
+              status: 'Invoice Paid'
+            },
+            {
+              headers: {
+                Authorization: `Bearer ${GHL_API_KEY}`,
+                'Content-Type': 'application/json'
+              }
+            }
+          );
+
+          console.log(`Triggered GHL webhook for job ${jobUuid}`);
+          processedJobs.add(jobUuid); // Mark as processed
+        }
+      }
+    
       // Rest of the code...
     }
   } catch (error) {
