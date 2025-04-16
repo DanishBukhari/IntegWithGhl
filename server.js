@@ -31,7 +31,7 @@ app.post('/ghl-create-job', async (req, res) => {
     }
 
     // Step 1: Check if client exists in ServiceM8 by email
-    const clientsResponse = await axios.get('https://api.servicem8.com/api_1.0/client.json', {
+    const companiesResponse = await axios.get('https://api.servicem8.com/api_1.0/company.json', {
       headers: {
         Authorization: authHeader,
         Accept: 'application/json'
@@ -41,17 +41,17 @@ app.post('/ghl-create-job', async (req, res) => {
       }
     });
 
-    let clientUuid;
-    const clients = clientsResponse.data;
+    let companyUuid;
+    const companies = companiesResponse.data;
 
-    if (clients.length > 0) {
+    if (companies.length > 0) {
       // Client exists
-      clientUuid = clients[0].uuid;
-      console.log(`Client found: ${clientUuid}`);
+      companyUuid = companies[0].uuid;
+      console.log(`Client found: ${companyUuid}`);
     } else {
       // Step 2: Create a new client in ServiceM8
-      const newClientResponse = await axios.post(
-        'https://api.servicem8.com/api_1.0/client.json',
+      const newCompanyResponse = await axios.post(
+        'https://api.servicem8.com/api_1.0/company.json',
         {
           first_name: firstName,
           last_name: lastName,
@@ -68,15 +68,15 @@ app.post('/ghl-create-job', async (req, res) => {
         }
       );
 
-      clientUuid = newClientResponse.headers['x-record-uuid'];
-      console.log(`Client created: ${clientUuid}`);
+      companyUuid = newCompanyResponse.headers['x-record-uuid'];
+      console.log(`Client created: ${companyUuid}`);
     }
 
     // Step 3: Create a job in ServiceM8
     const jobResponse = await axios.post(
       'https://api.servicem8.com/api_1.0/job.json',
       {
-        company_uuid: clientUuid,
+        company_uuid: companyUuid,
         description: jobDescription,
         status: 'Quote'
       },
@@ -99,9 +99,10 @@ app.post('/ghl-create-job', async (req, res) => {
   }
 });
 
-// Function to check invoice status and trigger GHL webhook
-const checkInvoiceStatus = async () => {
+// Function to check payment status and trigger GHL webhook
+const checkPaymentStatus = async () => {
   try {
+    // Fetch all jobs with status 'Completed'
     const jobsResponse = await axios.get('https://api.servicem8.com/api_1.0/job.json', {
       headers: {
         Authorization: authHeader,
@@ -116,13 +117,15 @@ const checkInvoiceStatus = async () => {
 
     for (const job of jobs) {
       const jobUuid = job.uuid;
-      console.log(`Checking invoices for job UUID: ${jobUuid}`); // Add logging
+      console.log(`Checking payments for job UUID: ${jobUuid}`);
 
       if (processedJobs.has(jobUuid)) {
+        console.log(`Job ${jobUuid} already processed, skipping.`);
         continue;
       }
 
-      const invoicesResponse = await axios.get('https://api.servicem8.com/api_1.0/invoice.json', {
+      // Fetch payments for the job
+      const paymentsResponse = await axios.get('https://api.servicem8.com/api_1.0/jobpayment.json', {
         headers: {
           Authorization: authHeader,
           Accept: 'application/json'
@@ -132,40 +135,66 @@ const checkInvoiceStatus = async () => {
         }
       });
 
-      const invoices = invoicesResponse.data;
-      // Rest of the code..
-      if (invoices.length > 0) {
-        const invoice = invoices[0];
-        if (invoice.status === 'Paid') {
-          // Invoice is paid, trigger GHL webhook (Workflow 2)
-          await axios.post(
-            GHL_WEBHOOK_URL,
-            {
-              jobUuid: jobUuid,
-              clientEmail: job.company_email,
-              status: 'Invoice Paid'
-            },
-            {
-              headers: {
-                Authorization: `Bearer ${GHL_API_KEY}`,
-                'Content-Type': 'application/json'
-              }
-            }
-          );
+      const payments = paymentsResponse.data;
+      console.log(`Found ${payments.length} payment records for job ${jobUuid}`);
 
-          console.log(`Triggered GHL webhook for job ${jobUuid}`);
-          processedJobs.add(jobUuid); // Mark as processed
-        }
+      if (payments.length > 0) {
+        // Payment exists, assume the job is paid
+        const payment = payments[0];
+        console.log(`Payment found for job ${jobUuid}: Amount ${payment.amount}, Date ${payment.payment_date}`);
+
+        // Trigger GHL webhook (Workflow 2)
+        await axios.post(
+          GHL_WEBHOOK_URL,
+          {
+            jobUuid: jobUuid,
+            clientEmail: job.company_email,
+            status: 'Invoice Paid'
+          },
+          {
+            headers: {
+              Authorization: `Bearer ${GHL_API_KEY}`,
+              'Content-Type': 'application/json'
+            }
+          }
+        );
+
+        console.log(`Triggered GHL webhook for job ${jobUuid}`);
+        processedJobs.add(jobUuid); // Mark as processed
       }
     }
   } catch (error) {
-    console.error('Error checking invoice status:', error.response ? error.response.data : error.message);
+    console.error('Error checking payment status:', error.response ? error.response.data : error.message);
   }
 };
+
 // Schedule polling every 5 minutes
 cron.schedule('*/5 * * * *', () => {
-  console.log('Polling ServiceM8 for completed jobs and paid invoices...');
-  checkInvoiceStatus();
+  console.log('Polling ServiceM8 for completed jobs and paid payments...');
+  checkPaymentStatus();
+});
+
+app.get('/test-webhook', async (req, res) => {
+  try {
+    await axios.post(
+      GHL_WEBHOOK_URL,
+      {
+        jobUuid: 'test-job-uuid-123',
+        clientEmail: 'test@example.com',
+        status: 'Invoice Paid'
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${GHL_API_KEY}`,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+    res.send('Test webhook sent to GHL');
+  } catch (error) {
+    console.error('Error sending test webhook:', error.response ? error.response.data : error.message);
+    res.status(500).send('Failed to send test webhook');
+  }
 });
 
 app.listen(PORT, () => {
