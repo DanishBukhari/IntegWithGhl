@@ -1,7 +1,7 @@
-const express = require("express");
-const axios = require("axios");
-const cron = require("node-cron");
-const dotenv = require("dotenv");
+const express = require('express');
+const axios = require('axios');
+const cron = require('node-cron');
+const dotenv = require('dotenv');
 
 dotenv.config();
 
@@ -15,110 +15,96 @@ const GHL_WEBHOOK_URL = process.env.GHL_WEBHOOK_URL;
 const PORT = process.env.PORT || 3000;
 
 // Base64 encode credentials for HTTP Basic Auth
-const authHeader =
-  "Basic " +
-  Buffer.from(`${SERVICE_M8_USERNAME}:${SERVICE_M8_PASSWORD}`).toString(
-    "base64"
-  );
+const authHeader = 'Basic ' + Buffer.from(`${SERVICE_M8_USERNAME}:${SERVICE_M8_PASSWORD}`).toString('base64');
 
 // Store processed job UUIDs to avoid duplicate triggers
 const processedJobs = new Set();
 
 // Endpoint for GHL to create a job in ServiceM8 (Workflow 1)
-app.post("/ghl-create-job", async (req, res) => {
+app.post('/ghl-create-job', async (req, res) => {
   try {
-    const { firstName, lastName, email, phone, address, jobDescription } =
-      req.body;
+    const { firstName, lastName, email, phone, address, jobDescription, ghlContactId } = req.body;
 
     // Validate request
-    if (
-      !firstName ||
-      !lastName ||
-      !email ||
-      !phone ||
-      !address ||
-      !jobDescription
-    ) {
-      return res.status(400).json({ error: "Missing required fields" });
+    if (!firstName || !lastName || !email || !jobDescription || !ghlContactId) {
+      return res.status(400).json({ error: 'Missing required fields' });
     }
 
     // Step 1: Fetch all companies from ServiceM8
-    const companiesResponse = await axios.get(
-      "https://api.servicem8.com/api_1.0/company.json",
-      {
-        headers: {
-          Authorization: authHeader,
-          Accept: "application/json",
-        },
+    const companiesResponse = await axios.get('https://api.servicem8.com/api_1.0/company.json', {
+      headers: {
+        Authorization: authHeader,
+        Accept: 'application/json'
       }
-    );
+    });
 
     const companies = companiesResponse.data;
     console.log(`Fetched ${companies.length} companies from ServiceM8`);
 
-    // Step 2: Search for a company with the matching email
+    // Step 2: Search for a company with the matching name
+    const clientName = `${firstName} ${lastName}`;
     let companyUuid;
-    const matchingCompany = companies.find(
-      (company) =>
-        company.email && company.email.toLowerCase() === email.toLowerCase()
-    );
+    const matchingCompany = companies.find(company => company.name && company.name.toLowerCase() === clientName.toLowerCase());
 
     if (matchingCompany) {
-      // Client exists
+      // Client exists, reuse it
       companyUuid = matchingCompany.uuid;
-      console.log(`Client found: ${companyUuid} for email ${email}`);
+      console.log(`Client found: ${companyUuid} for name ${clientName}`);
     } else {
-      // Step 3: Create a new client in ServiceM8
+      // Step 3: Create a new client in ServiceM8 with email and phone
       const newCompanyResponse = await axios.post(
-        "https://api.servicem8.com/api_1.0/company.json",
+        'https://api.servicem8.com/api_1.0/company.json',
         {
-          name: `${firstName} ${lastName}`, // Add the mandatory name field
+          name: clientName,
           first_name: firstName,
           last_name: lastName,
           email: email,
-          mobile: phone,
-          billing_address: address,
+          mobile: phone || '',
+          billing_address: {
+            street: address || '',
+            city: '',
+            state: '',
+            postcode: '',
+            country: ''
+          }
         },
         {
           headers: {
             Authorization: authHeader,
-            "Content-Type": "application/json",
-            Accept: "application/json",
-          },
+            'Content-Type': 'application/json',
+            Accept: 'application/json'
+          }
         }
       );
 
-      companyUuid = newCompanyResponse.headers["x-record-uuid"];
-      console.log(`Client created: ${companyUuid} for email ${email}`);
+      companyUuid = newCompanyResponse.headers['x-record-uuid'];
+      console.log(`Client created: ${companyUuid} for name ${clientName} with email ${email} and phone ${phone}`);
     }
 
     // Step 4: Create a job in ServiceM8
     const jobResponse = await axios.post(
-      "https://api.servicem8.com/api_1.0/job.json",
+      'https://api.servicem8.com/api_1.0/job.json',
       {
         company_uuid: companyUuid,
-        description: `${jobDescription} (GHL Contact ID: ${req.body.ghlContactId})`,
-        status: "Quote",
+        description: `${jobDescription} (GHL Contact ID: ${ghlContactId})`,
+        status: 'Quote'
       },
       {
         headers: {
           Authorization: authHeader,
-          "Content-Type": "application/json",
-          Accept: "application/json",
-        },
+          'Content-Type': 'application/json',
+          Accept: 'application/json'
+        }
       }
     );
 
-    const jobUuid = jobResponse.headers["x-record-uuid"];
+    const jobUuid = jobResponse.headers['x-record-uuid'];
     console.log(`Job created: ${jobUuid}`);
 
-    res.status(200).json({ message: "Job created successfully", jobUuid });
+    res.status(200).json({ message: 'Job created successfully', jobUuid });
   } catch (error) {
-    console.error(
-      "Error creating job:",
-      error.response ? error.response.data : error.message
-    );
-    res.status(500).json({ error: "Failed to create job" });
+    console.error('Error creating job:', error.response ? error.response.data : error.message);
+    res.status(500).json({ error: 'Failed to create job' });
   }
 });
 
@@ -126,18 +112,15 @@ app.post("/ghl-create-job", async (req, res) => {
 const checkPaymentStatus = async () => {
   try {
     // Fetch all jobs with status 'Completed'
-    const jobsResponse = await axios.get(
-      "https://api.servicem8.com/api_1.0/job.json",
-      {
-        headers: {
-          Authorization: authHeader,
-          Accept: "application/json",
-        },
-        params: {
-          $filter: "status eq 'Completed'",
-        },
+    const jobsResponse = await axios.get('https://api.servicem8.com/api_1.0/job.json', {
+      headers: {
+        Authorization: authHeader,
+        Accept: 'application/json'
+      },
+      params: {
+        '$filter': "status eq 'Completed'"
       }
-    );
+    });
 
     const jobs = jobsResponse.data;
 
@@ -151,77 +134,60 @@ const checkPaymentStatus = async () => {
       }
 
       // Fetch payments for the job
-      const paymentsResponse = await axios.get(
-        "https://api.servicem8.com/api_1.0/jobpayment.json",
-        {
-          headers: {
-            Authorization: authHeader,
-            Accept: "application/json",
-          },
-          params: {
-            $filter: `job_uuid eq '${jobUuid}'`,
-          },
+      const paymentsResponse = await axios.get('https://api.servicem8.com/api_1.0/jobpayment.json', {
+        headers: {
+          Authorization: authHeader,
+          Accept: 'application/json'
+        },
+        params: {
+          '$filter': `job_uuid eq '${jobUuid}'`
         }
-      );
+      });
 
       const payments = paymentsResponse.data;
-      console.log(
-        `Found ${payments.length} payment records for job ${jobUuid}`
-      );
+      console.log(`Found ${payments.length} payment records for job ${jobUuid}`);
 
       if (payments.length > 0) {
         // Payment exists, assume the job is paid
         const payment = payments[0];
-        console.log(
-          `Payment found for job ${jobUuid}: Amount ${payment.amount}, Date ${payment.payment_date}`
-        );
+        console.log(`Payment found for job ${jobUuid}: Amount ${payment.amount}, Date ${payment.payment_date}`);
 
         // Fetch the company details to get the email
-        const companyResponse = await axios.get(
-          `https://api.servicem8.com/api_1.0/company/${job.company_uuid}.json`,
-          {
-            headers: {
-              Authorization: authHeader,
-              Accept: "application/json",
-            },
+        const companyResponse = await axios.get(`https://api.servicem8.com/api_1.0/company/${job.company_uuid}.json`, {
+          headers: {
+            Authorization: authHeader,
+            Accept: 'application/json'
           }
-        );
+        });
 
         const company = companyResponse.data;
-        const clientEmail = company.email || "";
+        const clientEmail = (company.email || '').trim().toLowerCase();
         console.log(`Fetched company email for job ${jobUuid}: ${clientEmail}`);
 
         if (!clientEmail) {
-          console.log(
-            `No email found for company ${job.company_uuid}, skipping webhook trigger.`
-          );
+          console.log(`No email found for company ${job.company_uuid}, skipping webhook trigger.`);
           continue;
         }
 
+        // Extract GHL Contact ID from job description
+        const ghlContactIdMatch = job.description.match(/GHL Contact ID: (\S+)/);
+        const ghlContactId = ghlContactIdMatch ? ghlContactIdMatch[1] : '';
+
         // Trigger GHL webhook (Workflow 2)
-        console.log(
-          `Triggering GHL webhook for job ${jobUuid} with clientEmail: ${clientEmail}`
-        );
-        const ghlContactIdMatch = job.description.match(
-          /GHL Contact ID: (\S+)/
-        );
-        const ghlContactId = ghlContactIdMatch ? ghlContactIdMatch[1] : "";
-        console.log(
-          `Extracted GHL Contact ID for job ${jobUuid}: ${ghlContactId}`
-        );
+        console.log(`Triggering GHL webhook for job ${jobUuid} with clientEmail: ${clientEmail} and ghlContactId: ${ghlContactId}`);
         await axios.post(
           GHL_WEBHOOK_URL,
           {
             jobUuid: jobUuid,
             clientEmail: clientEmail,
             ghlContactId: ghlContactId,
-            status: "Invoice Paid",
+            status: 'Invoice Paid'
           },
           {
             headers: {
               Authorization: `Bearer ${GHL_API_KEY}`,
-              "Content-Type": "application/json",
-            },
+              'Content-Type': 'application/json'
+            }
           }
         );
 
@@ -230,22 +196,19 @@ const checkPaymentStatus = async () => {
       }
     }
   } catch (error) {
-    console.error(
-      "Error checking payment status:",
-      error.response ? error.response.data : error.message
-    );
+    console.error('Error checking payment status:', error.response ? error.response.data : error.message);
   }
 };
 
 // Temporary endpoint to manually trigger payment polling
-app.get("/test-payment-check", async (req, res) => {
+app.get('/test-payment-check', async (req, res) => {
   await checkPaymentStatus();
-  res.send("Payment check triggered");
+  res.send('Payment check triggered');
 });
 
 // Schedule polling every 5 minutes
-cron.schedule("*/5 * * * *", () => {
-  console.log("Polling ServiceM8 for completed jobs and paid payments...");
+cron.schedule('*/5 * * * *', () => {
+  console.log('Polling ServiceM8 for completed jobs and paid payments...');
   checkPaymentStatus();
 });
 
