@@ -18,8 +18,8 @@ let SERVICE_M8_ACCESS_TOKEN = null;
 // Add-on Activation
 app.get('/activate-addon', (req, res) => {
   const redirectUri = encodeURIComponent('https://integwithghl-0125ea6b2dc5.herokuapp.com/oauth/callback');
-  const scope = encodeURIComponent('staff job client invoice');
-  const redirectUrl = `https://go.servicem8.com/api_oauth/authorize?client_id=${SERVICE_M8_CLIENT_ID}&redirect_uri=${redirectUri}&response_type=code&scope=${scope}`;
+  const scope = encodeURIComponent('read_staff read_jobs create_jobs manage_jobs read_customers manage_customers read_invoices');
+  const redirectUrl = `https://go.servicem8.com/api_oauth/authorize?client_id=${SERVICE_M8_CLIENT_ID}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=${encodeURIComponent(scope)}`;
   res.redirect(redirectUrl);
 });
 
