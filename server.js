@@ -102,7 +102,6 @@ app.post('/ghl-create-job', async (req, res) => {
 // Function to check invoice status and trigger GHL webhook
 const checkInvoiceStatus = async () => {
   try {
-    // Fetch all jobs with status 'Completed'
     const jobsResponse = await axios.get('https://api.servicem8.com/api_1.0/job.json', {
       headers: {
         Authorization: authHeader,
@@ -117,13 +116,12 @@ const checkInvoiceStatus = async () => {
 
     for (const job of jobs) {
       const jobUuid = job.uuid;
+      console.log(`Checking invoices for job UUID: ${jobUuid}`); // Add logging
 
-      // Skip if already processed
       if (processedJobs.has(jobUuid)) {
         continue;
       }
 
-      // Fetch invoices for the job
       const invoicesResponse = await axios.get('https://api.servicem8.com/api_1.0/invoice.json', {
         headers: {
           Authorization: authHeader,
@@ -135,36 +133,12 @@ const checkInvoiceStatus = async () => {
       });
 
       const invoices = invoicesResponse.data;
-
-      if (invoices.length > 0) {
-        const invoice = invoices[0];
-        if (invoice.status === 'Paid') {
-          // Invoice is paid, trigger GHL webhook (Workflow 2)
-          await axios.post(
-            GHL_WEBHOOK_URL,
-            {
-              jobUuid: jobUuid,
-              clientEmail: job.company_email,
-              status: 'Invoice Paid'
-            },
-            {
-              headers: {
-                Authorization: `Bearer ${GHL_API_KEY}`,
-                'Content-Type': 'application/json'
-              }
-            }
-          );
-
-          console.log(`Triggered GHL webhook for job ${jobUuid}`);
-          processedJobs.add(jobUuid); // Mark as processed
-        }
-      }
+      // Rest of the code...
     }
   } catch (error) {
     console.error('Error checking invoice status:', error.response ? error.response.data : error.message);
   }
 };
-
 // Schedule polling every 5 minutes
 cron.schedule('*/5 * * * *', () => {
   console.log('Polling ServiceM8 for completed jobs and paid invoices...');
