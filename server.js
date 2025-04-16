@@ -50,12 +50,13 @@ app.post('/ghl-create-job', async (req, res) => {
       // Client exists, reuse it
       companyUuid = matchingCompany.uuid;
       console.log(`Client found: ${companyUuid} for name ${clientName}, email: ${matchingCompany.email}, phone: ${matchingCompany.mobile}`);
-      // Optionally update existing client's email and phone if they differ
+      // Update existing client's email and phone if they differ
       if (matchingCompany.email !== email || matchingCompany.mobile !== phone) {
         console.log(`Updating client ${companyUuid} with new email ${email} and phone ${phone}`);
-        await axios.put(
+        const updateResponse = await axios.put(
           `https://api.servicem8.com/api_1.0/company/${companyUuid}.json`,
           {
+            name: clientName, // Include name to ensure it's valid
             email: email,
             mobile: phone || ''
           },
@@ -67,7 +68,7 @@ app.post('/ghl-create-job', async (req, res) => {
             }
           }
         );
-        console.log(`Client ${companyUuid} updated`);
+        console.log(`Client ${companyUuid} updated with status: ${updateResponse.status}`);
       }
     } else {
       // Step 3: Create a new client in ServiceM8 with email and phone
@@ -106,7 +107,7 @@ app.post('/ghl-create-job', async (req, res) => {
       'https://api.servicem8.com/api_1.0/job.json',
       {
         company_uuid: companyUuid,
-        description: `${jobDescription} (GHL Contact ID: ${ghlContactId})`,
+        description: jobDescription ? `${jobDescription} (GHL Contact ID: ${ghlContactId})` : `(GHL Contact ID: ${ghlContactId})`,
         status: 'Quote'
       },
       {
@@ -182,18 +183,19 @@ const checkPaymentStatus = async () => {
         });
 
         const company = companyResponse.data;
-        const clientEmail = (company.email || company.company_email || '').trim().toLowerCase(); // Try alternate field name
+        const clientEmail = (company.email || company.company_email || '').trim().toLowerCase();
         console.log(`Fetched company email for job ${jobUuid}: ${clientEmail}`);
 
-        if (!clientEmail) {
-          console.log(`No email found for company ${job.company_uuid}, attempting to use GHL Contact ID`);
+        // Extract GHL Contact ID from job description, with fallback
+        let ghlContactId = '';
+        if (job.description) {
+          const ghlContactIdMatch = job.description.match(/GHL Contact ID: (\S+)/);
+          ghlContactId = ghlContactIdMatch ? ghlContactIdMatch[1] : '';
+        } else {
+          console.log(`Job description is undefined for job ${jobUuid}, GHL Contact ID not found`);
         }
 
-        // Extract GHL Contact ID from job description
-        const ghlContactIdMatch = job.description.match(/GHL Contact ID: (\S+)/);
-        const ghlContactId = ghlContactIdMatch ? ghlContactIdMatch[1] : '';
-
-        // Trigger GHL webhook (Workflow 2) even if email is missing, relying on ghlContactId
+        // Trigger GHL webhook (Workflow 2)
         console.log(`Triggering GHL webhook for job ${jobUuid} with clientEmail: ${clientEmail} and ghlContactId: ${ghlContactId}`);
         await axios.post(
           GHL_WEBHOOK_URL,
