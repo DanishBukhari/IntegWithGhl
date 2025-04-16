@@ -41,22 +41,21 @@ app.post('/ghl-create-job', async (req, res) => {
     const companies = companiesResponse.data;
     console.log(`Fetched ${companies.length} companies from ServiceM8`);
 
-    // Step 2: Search for a company with the matching name
-    const clientName = `${firstName} ${lastName}`;
+    // Step 2: Search for a company with the matching email
     let companyUuid;
-    const matchingCompany = companies.find(company => company.name && company.name.toLowerCase() === clientName.toLowerCase());
+    const matchingCompany = companies.find(company => company.email && company.email.toLowerCase() === email.toLowerCase());
 
     if (matchingCompany) {
       // Client exists, reuse it
       companyUuid = matchingCompany.uuid;
-      console.log(`Client found: ${companyUuid} for name ${clientName}, email: ${matchingCompany.email}, phone: ${matchingCompany.mobile}`);
-      // Update existing client's email and phone if they differ
-      if (matchingCompany.email !== email || matchingCompany.mobile !== phone) {
-        console.log(`Updating client ${companyUuid} with new email ${email} and phone ${phone}`);
+      console.log(`Client found: ${companyUuid} for email ${email}, phone: ${matchingCompany.mobile}`);
+      // Update existing client's phone if it differs
+      if (matchingCompany.mobile !== phone) {
+        console.log(`Updating client ${companyUuid} with new phone ${phone}`);
         const updateResponse = await axios.put(
           `https://api.servicem8.com/api_1.0/company/${companyUuid}.json`,
           {
-            name: clientName, // Include name to ensure it's valid
+            name: `${matchingCompany.first_name} ${matchingCompany.last_name}`, // Preserve existing name
             email: email,
             mobile: phone || ''
           },
@@ -72,11 +71,11 @@ app.post('/ghl-create-job', async (req, res) => {
       }
     } else {
       // Step 3: Create a new client in ServiceM8 with email and phone
-      console.log(`Creating new client with name ${clientName}, email ${email}, phone ${phone}`);
+      console.log(`Creating new client with name ${firstName} ${lastName}, email ${email}, phone ${phone}`);
       const newCompanyResponse = await axios.post(
         'https://api.servicem8.com/api_1.0/company.json',
         {
-          name: clientName,
+          name: `${firstName} ${lastName}`,
           first_name: firstName,
           last_name: lastName,
           email: email,
@@ -99,7 +98,7 @@ app.post('/ghl-create-job', async (req, res) => {
       );
 
       companyUuid = newCompanyResponse.headers['x-record-uuid'];
-      console.log(`Client created: ${companyUuid} for name ${clientName} with email ${email} and phone ${phone}`);
+      console.log(`Client created: ${companyUuid} for email ${email} with phone ${phone}`);
     }
 
     // Step 4: Create a job in ServiceM8
