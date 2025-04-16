@@ -54,6 +54,7 @@ app.post('/ghl-create-job', async (req, res) => {
       const newCompanyResponse = await axios.post(
         'https://api.servicem8.com/api_1.0/company.json',
         {
+          name: `${firstName} ${lastName}`, // Add the mandatory name field
           first_name: firstName,
           last_name: lastName,
           email: email,
@@ -169,33 +170,16 @@ const checkPaymentStatus = async () => {
   }
 };
 
+// Temporary endpoint to manually trigger payment polling
+app.get('/test-payment-check', async (req, res) => {
+  await checkPaymentStatus();
+  res.send('Payment check triggered');
+});
+
 // Schedule polling every 5 minutes
 cron.schedule('*/5 * * * *', () => {
   console.log('Polling ServiceM8 for completed jobs and paid payments...');
   checkPaymentStatus();
-});
-
-app.get('/test-webhook', async (req, res) => {
-  try {
-    await axios.post(
-      GHL_WEBHOOK_URL,
-      {
-        jobUuid: 'test-job-uuid-123',
-        clientEmail: 'test@example.com',
-        status: 'Invoice Paid'
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${GHL_API_KEY}`,
-          'Content-Type': 'application/json'
-        }
-      }
-    );
-    res.send('Test webhook sent to GHL');
-  } catch (error) {
-    console.error('Error sending test webhook:', error.response ? error.response.data : error.message);
-    res.status(500).send('Failed to send test webhook');
-  }
 });
 
 app.listen(PORT, () => {
