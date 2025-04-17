@@ -60,7 +60,7 @@ app.post('/ghl-create-job', async (req, res) => {
         'https://api.servicem8.com/api_1.0/company.json',
         {
           
-          name: fullName,    
+          name: fullName,
         },
         {
           headers: {
@@ -171,7 +171,7 @@ const checkPaymentStatus = async () => {
         console.log(`Payment found for job ${jobUuid}: Amount ${payment.amount}, Date ${paymentDate}`);
 
         // Fetch the company details to get the email
-        const companyResponse = await axios.get(`https://api.servicem8.com/api_1.0/companycontact/{uuid}.json`, {
+        const companyResponse = await axios.get(`https://api.servicem8.com/api_1.0/companycontact/.json`, {
           headers: {
             Authorization: authHeader,
             Accept: 'application/json'
