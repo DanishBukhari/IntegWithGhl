@@ -183,7 +183,7 @@ const checkPaymentStatus = async () => {
         });
 
         const company = companyResponse.data;
-        const clientEmail = (company.email || company.company_email || '').trim().toLowerCase();
+        const clientEmail = (company?.[0]?.email || '').trim().toLowerCase();
         console.log(`Fetched company email for job ${jobUuid}: ${clientEmail}`);
 
         // Extract GHL Contact ID from job description, with fallback
