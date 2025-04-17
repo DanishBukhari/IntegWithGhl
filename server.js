@@ -52,7 +52,7 @@ app.post('/ghl-create-job', async (req, res) => {
 
     if (matchingCompany) {
       companyUuid = matchingCompany.uuid;
-      console.log(`Client already exists: ${companyUuid} for email ${email}, phone: ${matchingCompany.mobile}`);
+      console.log(`Client already exists: ${companyUuid} for email ${email}, phone: ${matchingCompany.phone}`);
     } else {
       // Step 3: Create a new client in ServiceM8
       console.log(`Creating new client with name ${fullName}, email ${email}, phone ${phone}`);
@@ -192,7 +192,9 @@ console.log(`Extracted client email: ${clientEmail}`);
         // Extract GHL Contact ID from job description, with fallback
         let ghlContactId = '';
         if (job.job_description) {
-          const ghlContactIdMatch = job.job_description.match(/GHL Contact ID: (\S+)/);
+          // const ghlContactIdMatch = job.job_description.match(/GHL Contact ID: (\S+)/);
+          const ghlContactIdMatch = job.job_description.match(/GHL Contact ID: ([a-zA-Z0-9]+)/);
+
           ghlContactId = ghlContactIdMatch ? ghlContactIdMatch[1] : '';
         } else {
           console.log(`Job description is undefined for job ${jobUuid}, GHL Contact ID not found`);
