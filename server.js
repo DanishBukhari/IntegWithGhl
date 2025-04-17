@@ -183,7 +183,7 @@ const checkPaymentStatus = async () => {
         });
 
         const company = companyResponse.data;
-        console.log('Company contacts response:', contacts);
+        console.log('Company contacts response:', company);
         const primaryContact = company.find(c => c.email) || {};
 const clientEmail = (primaryContact.email || '').trim().toLowerCase();
 console.log(`Extracted client email: ${clientEmail}`);
