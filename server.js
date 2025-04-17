@@ -167,6 +167,7 @@ const checkPaymentStatus = async () => {
       if (payments.length > 0) {
         // Payment exists, assume the job is paid
         const payment = payments[0];
+        const companyUuid = job.company_uuid;
         const paymentDate = payment.date_paid || payment.payment_date || 'not available';
         console.log(`Payment found for job ${jobUuid}: Amount ${payment.amount}, Date ${paymentDate}`);
 
@@ -175,6 +176,9 @@ const checkPaymentStatus = async () => {
           headers: {
             Authorization: authHeader,
             Accept: 'application/json'
+          },
+          params: {
+            '$filter': `company_uuid eq '${companyUuid}'`
           }
         });
 
