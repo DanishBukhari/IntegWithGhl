@@ -172,7 +172,7 @@ const checkPaymentStatus = async () => {
         console.log(`Payment found for job ${jobUuid}: Amount ${payment.amount}, Date ${paymentDate}`);
 
         // Fetch the company details to get the email
-        const companyResponse = await axios.get(`https://api.servicem8.com/api_1.0/companycontact/.json`, {
+        const companyResponse = await axios.get(`https://api.servicem8.com/api_1.0/companycontact.json`, {
           headers: {
             Authorization: authHeader,
             Accept: 'application/json'
