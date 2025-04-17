@@ -59,14 +59,8 @@ app.post('/ghl-create-job', async (req, res) => {
           first_name: firstName,
           last_name: lastName,
           email: email,
-          mobile: phone || '',
-          billing_address: {
-            street: address || '',
-            city: '',
-            state: '',
-            postcode: '',
-            country: ''
-          }
+          phone: phone || '',
+          
         },
         {
           headers: {
