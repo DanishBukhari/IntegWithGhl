@@ -59,7 +59,7 @@ app.post('/ghl-create-job', async (req, res) => {
       const newCompanyResponse = await axios.post(
         'https://api.servicem8.com/api_1.0/company.json',
         {
-          clientUuid: uuid,
+          
           name: fullName,    
         },
         {
@@ -78,7 +78,6 @@ app.post('/ghl-create-job', async (req, res) => {
       await axios.post(
         `https://api.servicem8.com/api_1.0/companycontact.json`,
         {
-          clientUuid: uuid,
           company_uuid: companyUuid,
           first: fullName,
           last: lastName,
