@@ -86,7 +86,7 @@ app.post('/ghl-create-job', async (req, res) => {
 
       // Step 4: Add contact to the company so email and phone show in ServiceM8
       await axios.post(
-        `https://api.servicem8.com/api_1.0/contact.json`,
+        `https://api.servicem8.com/api_1.0/companycontact.json`,
         {
           company_uuid: companyUuid,
           name: fullName,
