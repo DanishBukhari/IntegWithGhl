@@ -59,18 +59,8 @@ app.post('/ghl-create-job', async (req, res) => {
       const newCompanyResponse = await axios.post(
         'https://api.servicem8.com/api_1.0/company.json',
         {
-          name: fullName,
-          first_name: firstName,
-          last_name: lastName,
-          email: email,
-          mobile: phone || '',
-          billing_address: {
-            street: address || '',
-            city: '',
-            state: '',
-            postcode: '',
-            country: ''
-          }
+          clientUuid: uuid,
+          name: fullName,    
         },
         {
           headers: {
@@ -88,10 +78,12 @@ app.post('/ghl-create-job', async (req, res) => {
       await axios.post(
         `https://api.servicem8.com/api_1.0/companycontact.json`,
         {
+          clientUuid: uuid,
           company_uuid: companyUuid,
-          name: fullName,
+          first: fullName,
+          last: lastName,
           email: email,
-          mobile: phone
+          phone: phone
         },
         {
           headers: {
@@ -110,7 +102,7 @@ app.post('/ghl-create-job', async (req, res) => {
       'https://api.servicem8.com/api_1.0/job.json',
       {
         company_uuid: companyUuid,
-        description: jobDescription ? `${jobDescription} (GHL Contact ID: ${ghlContactId})` : `(GHL Contact ID: ${ghlContactId})`,
+        job_description: jobDescription ? `${jobDescription} (GHL Contact ID: ${ghlContactId})` : `(GHL Contact ID: ${ghlContactId})`,
         status: 'Quote'
       },
       {
@@ -180,7 +172,7 @@ const checkPaymentStatus = async () => {
         console.log(`Payment found for job ${jobUuid}: Amount ${payment.amount}, Date ${paymentDate}`);
 
         // Fetch the company details to get the email
-        const companyResponse = await axios.get(`https://api.servicem8.com/api_1.0/company/${job.company_uuid}.json`, {
+        const companyResponse = await axios.get(`https://api.servicem8.com/api_1.0/companycontact/{uuid}.json`, {
           headers: {
             Authorization: authHeader,
             Accept: 'application/json'
@@ -193,8 +185,8 @@ const checkPaymentStatus = async () => {
 
         // Extract GHL Contact ID from job description, with fallback
         let ghlContactId = '';
-        if (job.description) {
-          const ghlContactIdMatch = job.description.match(/GHL Contact ID: (\S+)/);
+        if (job.job_description) {
+          const ghlContactIdMatch = job.job_description.match(/GHL Contact ID: (\S+)/);
           ghlContactId = ghlContactIdMatch ? ghlContactIdMatch[1] : '';
         } else {
           console.log(`Job description is undefined for job ${jobUuid}, GHL Contact ID not found`);
