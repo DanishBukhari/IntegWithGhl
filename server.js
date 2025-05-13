@@ -2,6 +2,7 @@ const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
 const dotenv = require('dotenv');
+const fs = require('fs').promises;
 
 dotenv.config();
 
@@ -19,6 +20,164 @@ const authHeader = 'Basic ' + Buffer.from(`${SERVICE_M8_USERNAME}:${SERVICE_M8_P
 
 // Store processed job UUIDs to avoid duplicate triggers
 const processedJobs = new Set();
+
+// Store processed contact UUIDs to avoid duplicate processing
+let processedContacts = new Set();
+
+// File to store polling state
+const STATE_FILE = 'state.json';
+
+// Load polling state from file
+async function loadState() {
+  try {
+    const data = await fs.readFile(STATE_FILE, 'utf8');
+    const state = JSON.parse(data);
+    processedContacts = new Set(state.processedContacts || []);
+    return state.lastPollTimestamp || 0;
+  } catch (error) {
+    return 0; // If file doesn’t exist, start from epoch
+  }
+}
+
+// Save polling state to file
+async function saveState(lastPollTimestamp) {
+  await fs.writeFile(STATE_FILE, JSON.stringify({
+    lastPollTimestamp,
+    processedContacts: Array.from(processedContacts)
+  }));
+}
+
+// Function to check for new ServiceM8 contacts and sync to GHL
+const checkNewContacts = async () => {
+  try {
+    console.log('Polling ServiceM8 for new contacts...');
+    const lastPollTimestamp = await loadState();
+    const currentTimestamp = Date.now();
+
+    // Fetch all company contacts
+    const contactsResponse = await axios.get('https://api.servicem8.com/api_1.0/companycontact.json', {
+      headers: {
+        Authorization: authHeader,
+        Accept: 'application/json'
+      }
+    });
+
+    const contacts = contactsResponse.data;
+    console.log(`Fetched ${contacts.length} contacts from ServiceM8`);
+
+    for (const contact of contacts) {
+      const contactUuid = contact.uuid;
+
+      // Skip if already processed
+      if (processedContacts.has(contactUuid)) {
+        continue;
+      }
+
+      // Extract contact details
+      const { first, last, email, phone, mobile, company_uuid } = contact;
+      const contactName = `${first || ''} ${last || ''}`.trim();
+
+      // Log received contact details
+      console.log(`New contact found - UUID: ${contactUuid}, Name: ${contactName}, Email: ${email}, Phone: ${phone || mobile}, Company UUID: ${company_uuid}`);
+
+      // Skip if no email or name
+      if (!email && !contactName) {
+        console.log(`No email or name for contact ${contactUuid}, skipping GHL creation.`);
+        processedContacts.add(contactUuid);
+        continue;
+      }
+
+      // Check if contact exists in GHL by email
+      let ghlContactId = null;
+      try {
+        if (email) {
+          const searchResponse = await axios.get(`https://rest.gohighlevel.com/v1/contacts/`, {
+            headers: {
+              Authorization: `Bearer ${GHL_API_KEY}`,
+              Accept: 'application/json'
+            },
+            params: {
+              query: email
+            }
+          });
+
+          const existingContact = searchResponse.data.contacts.find(c => (c.email || '').toLowerCase().trim() === (email || '').toLowerCase().trim());
+          if (existingContact) {
+            ghlContactId = existingContact.id;
+            console.log(`Contact already exists in GHL: ${ghlContactId} for email ${email}`);
+            processedContacts.add(contactUuid);
+            continue;
+          }
+        }
+      } catch (error) {
+        console.error(`Error checking GHL contact for email ${email}:`, error.response ? error.response.data : error.message);
+      }
+
+      // Fetch company details for address
+      let addressDetails = {};
+      try {
+        const companyResponse = await axios.get(`https://api.servicem8.com/api_1.0/company.json`, {
+          headers: {
+            Authorization: authHeader,
+            Accept: 'application/json'
+          },
+          params: {
+            '$filter': `uuid eq '${company_uuid}'`
+          }
+        });
+
+        const company = companyResponse.data[0] || {};
+        addressDetails = {
+          address1: company.billing_address || '',
+          city: company.billing_city || '',
+          state: company.billing_state || '',
+          postalCode: company.billing_postcode || ''
+        };
+        console.log(`Fetched company address for ${company_uuid}:`, addressDetails);
+      } catch (error) {
+        console.error(`Error fetching company details for ${company_uuid}:`, error.response ? error.response.data : error.message);
+      }
+
+      // Create contact in GHL
+      try {
+        const ghlContactResponse = await axios.post(
+          'https://rest.gohighlevel.com/v1/contacts/',
+          {
+            firstName: first || '',
+            lastName: last || '',
+            name: contactName,
+            email: email || '',
+            phone: phone || mobile || '',
+            address1: addressDetails.address1,
+            city: addressDetails.city,
+            state: addressDetails.state,
+            postalCode: addressDetails.postalCode
+          },
+          {
+            headers: {
+              Authorization: `Bearer ${GHL_API_KEY}`,
+              'Content-Type': 'application/json',
+              Accept: 'application/json'
+            }
+          }
+        );
+
+        ghlContactId = ghlContactResponse.data.contact.id;
+        console.log(`Created GHL contact: ${ghlContactId} for email ${email}`);
+
+        // Mark contact as processed
+        processedContacts.add(contactUuid);
+      } catch (error) {
+        console.error('Error creating GHL contact:', error.response ? error.response.data : error.message);
+      }
+    }
+
+    // Update polling state
+    await saveState(currentTimestamp);
+  } catch (error) {
+    console.error('Error polling contacts:', error.response ? error.response.data : error.message);
+  }
+};
 
 // Endpoint for GHL to create a job in ServiceM8 (Workflow 1)
 app.post('/ghl-create-job', async (req, res) => {
@@ -41,14 +200,18 @@ app.post('/ghl-create-job', async (req, res) => {
     const companies = companiesResponse.data;
     console.log(`Fetched ${companies.length} companies from ServiceM8`);
 
-    // Step 2: Search for a company with the matching email OR name
+    // Step 2: Search for a company with the matching email OR name (case-insensitive)
     let companyUuid;
-    const fullName = `${firstName} ${lastName}`.toLowerCase();
+    const fullName = `${firstName} ${lastName}`.toLowerCase().trim();
 
-    const matchingCompany = companies.find(company =>
-      (company.email && company.email.toLowerCase() === email.toLowerCase()) ||
-      (company.name && company.name.toLowerCase() === fullName)
-    );
+    const matchingCompany = companies.find(company => {
+      const companyEmail = (company.email || '').toLowerCase().trim();
+      const companyName = (company.name || '').toLowerCase().trim();
+      const inputEmail = (email || '').toLowerCase().trim();
+      const inputName = fullName;
+      console.log(`Comparing email: ${companyEmail} vs ${inputEmail}, name: ${companyName} vs ${inputName}`);
+      return companyEmail === inputEmail || companyName === inputName;
+    });
 
     if (matchingCompany) {
       companyUuid = matchingCompany.uuid;
@@ -59,7 +222,6 @@ app.post('/ghl-create-job', async (req, res) => {
       const newCompanyResponse = await axios.post(
         'https://api.servicem8.com/api_1.0/company.json',
         {
-          
           name: fullName,
         },
         {
@@ -79,7 +241,7 @@ app.post('/ghl-create-job', async (req, res) => {
         `https://api.servicem8.com/api_1.0/companycontact.json`,
         {
           company_uuid: companyUuid,
-          first: fullName,
+          first: firstName,
           last: lastName,
           email: email,
           phone: phone
@@ -123,7 +285,6 @@ app.post('/ghl-create-job', async (req, res) => {
     res.status(500).json({ error: 'Failed to create job' });
   }
 });
-
 
 // Function to check payment status and trigger GHL webhook
 const checkPaymentStatus = async () => {
@@ -185,16 +346,14 @@ const checkPaymentStatus = async () => {
         const company = companyResponse.data;
         console.log('Company contacts response:', company);
         const primaryContact = company.find(c => c.email) || {};
-const clientEmail = (primaryContact.email || '').trim().toLowerCase();
-console.log(`Extracted client email: ${clientEmail}`);
+        const clientEmail = (primaryContact.email || '').trim().toLowerCase();
+        console.log(`Extracted client email: ${clientEmail}`);
         console.log(`Fetched company email for job ${jobUuid}: ${clientEmail}`);
 
         // Extract GHL Contact ID from job description, with fallback
         let ghlContactId = '';
         if (job.job_description) {
-          // const ghlContactIdMatch = job.job_description.match(/GHL Contact ID: (\S+)/);
           const ghlContactIdMatch = job.job_description.match(/GHL Contact ID: ([a-zA-Z0-9]+)/);
-
           ghlContactId = ghlContactIdMatch ? ghlContactIdMatch[1] : '';
         } else {
           console.log(`Job description is undefined for job ${jobUuid}, GHL Contact ID not found`);
@@ -230,10 +389,22 @@ console.log(`Extracted client email: ${clientEmail}`);
 // Temporary endpoint to manually trigger payment polling
 app.get('/test-payment-check', async (req, res) => {
   await checkPaymentStatus();
-  res.send('Payment check triggered....');
+  res.send('Payment check triggered');
 });
 
-// Schedule polling every 5 minutes
+// Temporary endpoint to manually trigger contact polling
+app.get('/test-contact-check', async (req, res) => {
+  await checkNewContacts();
+  res.send('Contact check triggered');
+});
+
+// Schedule polling for contacts every 5 minutes
+cron.schedule('*/5 * * * *', () => {
+  console.log('Polling ServiceM8 for new contacts...');
+  checkNewContacts();
+});
+
+// Schedule polling for payments every 5 minutes
 cron.schedule('*/5 * * * *', () => {
   console.log('Polling ServiceM8 for completed jobs and paid payments...');
   checkPaymentStatus();
