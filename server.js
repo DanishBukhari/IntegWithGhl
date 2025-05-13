@@ -230,7 +230,7 @@ console.log(`Extracted client email: ${clientEmail}`);
 // Temporary endpoint to manually trigger payment polling
 app.get('/test-payment-check', async (req, res) => {
   await checkPaymentStatus();
-  res.send('Payment check triggered');
+  res.send('Payment check triggered....');
 });
 
 // Schedule polling every 5 minutes
