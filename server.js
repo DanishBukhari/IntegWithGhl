@@ -60,7 +60,7 @@ const checkNewContacts = async () => {
     // Calculate 24 hours ago in the account's local timezone
     const accountTimezone = 'Australia/Perth'; // Replace with your ServiceM8 account's timezone
     const now = moment().tz(accountTimezone);
-    const twentyFourHoursAgo = now.clone().subtract(24, 'hours').format('YYYY-MM-DD HH:mm:ss');
+    const twentyFourHoursAgo = now.clone().subtract(1, 'hours').format('YYYY-MM-DD HH:mm:ss');
     const filter = `$filter=edit_date gt '${twentyFourHoursAgo}'`;
 
     // Fetch only new or updated contacts from the last 24 hours
@@ -194,7 +194,7 @@ const checkPaymentStatus = async () => {
     // Calculate 24 hours ago in the account's local timezone
     const accountTimezone = 'Australia/Perth'; // Replace with your ServiceM8 account's timezone
     const now = moment().tz(accountTimezone);
-    const twentyFourHoursAgo = now.clone().subtract(24, 'hours').format('YYYY-MM-DD HH:mm:ss');
+    const twentyFourHoursAgo = now.clone().subtract(1, 'hours').format('YYYY-MM-DD HH:mm:ss');
     const filter = `$filter=edit_date gt '${twentyFourHoursAgo}'`;
 
     // Fetch only new or updated jobs from the last 24 hours
