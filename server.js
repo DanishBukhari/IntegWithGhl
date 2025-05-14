@@ -3,6 +3,7 @@ const axios = require('axios');
 const cron = require('node-cron');
 const dotenv = require('dotenv');
 const fs = require('fs').promises;
+const moment = require('moment-timezone');
 
 dotenv.config();
 
@@ -19,7 +20,7 @@ const PORT = process.env.PORT || 3000;
 const authHeader = 'Basic ' + Buffer.from(`${SERVICE_M8_USERNAME}:${SERVICE_M8_PASSWORD}`).toString('base64');
 
 // Store processed job UUIDs to avoid duplicate triggers
-const processedJobs = new Set();
+let processedJobs = new Set();
 
 // Store processed contact UUIDs to avoid duplicate processing
 let processedContacts = new Set();
@@ -32,6 +33,7 @@ async function loadState() {
   try {
     const data = await fs.readFile(STATE_FILE, 'utf8');
     const state = JSON.parse(data);
+    processedJobs = new Set(state.processedJobs || []);
     processedContacts = new Set(state.processedContacts || []);
     return state.lastPollTimestamp || 0;
   } catch (error) {
@@ -43,6 +45,7 @@ async function loadState() {
 async function saveState(lastPollTimestamp) {
   await fs.writeFile(STATE_FILE, JSON.stringify({
     lastPollTimestamp,
+    processedJobs: Array.from(processedJobs),
     processedContacts: Array.from(processedContacts)
   }));
 }
@@ -54,8 +57,14 @@ const checkNewContacts = async () => {
     const lastPollTimestamp = await loadState();
     const currentTimestamp = Date.now();
 
-    // Fetch all company contacts
-    const contactsResponse = await axios.get('https://api.servicem8.com/api_1.0/companycontact.json', {
+    // Calculate 24 hours ago in the account's local timezone
+    const accountTimezone = 'Australia/Perth'; // Replace with your ServiceM8 account's timezone
+    const now = moment().tz(accountTimezone);
+    const twentyFourHoursAgo = now.clone().subtract(24, 'hours').format('YYYY-MM-DD HH:mm:ss');
+    const filter = `$filter=edit_date gt '${twentyFourHoursAgo}'`;
+
+    // Fetch only new or updated contacts from the last 24 hours
+    const contactsResponse = await axios.get(`https://api.servicem8.com/api_1.0/companycontact.json?${filter}`, {
       headers: {
         Authorization: authHeader,
         Accept: 'application/json'
@@ -63,7 +72,7 @@ const checkNewContacts = async () => {
     });
 
     const contacts = contactsResponse.data;
-    console.log(`Fetched ${contacts.length} contacts from ServiceM8`);
+    console.log(`Fetched ${contacts.length} new or updated contacts from ServiceM8`);
 
     for (const contact of contacts) {
       const contactUuid = contact.uuid;
@@ -179,6 +188,110 @@ const checkNewContacts = async () => {
   }
 };
 
+// Function to check payment status and trigger GHL webhook
+const checkPaymentStatus = async () => {
+  try {
+    // Calculate 24 hours ago in the account's local timezone
+    const accountTimezone = 'Australia/Perth'; // Replace with your ServiceM8 account's timezone
+    const now = moment().tz(accountTimezone);
+    const twentyFourHoursAgo = now.clone().subtract(24, 'hours').format('YYYY-MM-DD HH:mm:ss');
+    const filter = `$filter=edit_date gt '${twentyFourHoursAgo}'`;
+
+    // Fetch only new or updated jobs from the last 24 hours
+    const jobsResponse = await axios.get(`https://api.servicem8.com/api_1.0/job.json?${filter}`, {
+      headers: {
+        Authorization: authHeader,
+        Accept: 'application/json'
+      }
+    });
+
+    const jobs = jobsResponse.data;
+    console.log(`Fetched ${jobs.length} new or updated jobs from ServiceM8`);
+
+    for (const job of jobs) {
+      const jobUuid = job.uuid;
+      console.log(`Checking payments for job UUID: ${jobUuid}`);
+
+      if (processedJobs.has(jobUuid)) {
+        console.log(`Job ${jobUuid} already processed, skipping.`);
+        continue;
+      }
+
+      // Fetch payments for the job
+      const paymentsResponse = await axios.get('https://api.servicem8.com/api_1.0/jobpayment.json', {
+        headers: {
+          Authorization: authHeader,
+          Accept: 'application/json'
+        },
+        params: {
+          '$filter': `job_uuid eq '${jobUuid}'`
+        }
+      });
+
+      const payments = paymentsResponse.data;
+      console.log(`Found ${payments.length} payment records for job ${jobUuid}`);
+
+      if (payments.length > 0) {
+        // Payment exists, assume the job is paid
+        const payment = payments[0];
+        const companyUuid = job.company_uuid;
+        const paymentDate = payment.date_paid || payment.payment_date || 'not available';
+        console.log(`Payment found for job ${jobUuid}: Amount ${payment.amount}, Date ${paymentDate}`);
+
+        // Fetch the company details to get the email
+        const companyResponse = await axios.get(`https://api.servicem8.com/api_1.0/companycontact.json`, {
+          headers: {
+            Authorization: authHeader,
+            Accept: 'application/json'
+          },
+          params: {
+            '$filter': `company_uuid eq '${companyUuid}'`
+          }
+        });
+
+        const company = companyResponse.data;
+        console.log('Company contacts response:', company);
+        const primaryContact = company.find(c => c.email) || {};
+        const clientEmail = (primaryContact.email || '').trim().toLowerCase();
+        console.log(`Extracted client email: ${clientEmail}`);
+        console.log(`Fetched company email for job ${jobUuid}: ${clientEmail}`);
+
+        // Extract GHL Contact ID from job description, with fallback
+        let ghlContactId = '';
+        if (job.job_description) {
+          const ghlContactIdMatch = job.job_description.match(/GHL Contact ID: ([a-zA-Z0-9]+)/);
+          ghlContactId = ghlContactIdMatch ? ghlContactIdMatch[1] : '';
+        } else {
+          console.log(`Job description is undefined for job ${jobUuid}, GHL Contact ID not found`);
+        }
+
+        // Trigger GHL webhook (Workflow 2)
+        console.log(`Triggering GHL webhook for job ${jobUuid} with clientEmail: ${clientEmail} and ghlContactId: ${ghlContactId}`);
+        await axios.post(
+          GHL_WEBHOOK_URL,
+          {
+            jobUuid: jobUuid,
+            clientEmail: clientEmail || '',
+            ghlContactId: ghlContactId,
+            status: 'Invoice Paid'
+          },
+          {
+            headers: {
+              Authorization: `Bearer ${GHL_API_KEY}`,
+              'Content-Type': 'application/json'
+            }
+          }
+        );
+
+        console.log(`Triggered GHL webhook for job ${jobUuid}`);
+        processedJobs.add(jobUuid); // Mark as processed
+      }
+    }
+  } catch (error) {
+    console.error('Error checking payment status:', error.response ? error.response.data : error.message);
+  }
+};
+
 // Endpoint for GHL to create a job in ServiceM8 (Workflow 1)
 app.post('/ghl-create-job', async (req, res) => {
   try {
@@ -286,106 +399,6 @@ app.post('/ghl-create-job', async (req, res) => {
   }
 });
 
-// Function to check payment status and trigger GHL webhook
-const checkPaymentStatus = async () => {
-  try {
-    // Fetch all jobs with status 'Completed'
-    const jobsResponse = await axios.get('https://api.servicem8.com/api_1.0/job.json', {
-      headers: {
-        Authorization: authHeader,
-        Accept: 'application/json'
-      },
-      params: {
-        '$filter': "status eq 'Completed'"
-      }
-    });
-
-    const jobs = jobsResponse.data;
-
-    for (const job of jobs) {
-      const jobUuid = job.uuid;
-      console.log(`Checking payments for job UUID: ${jobUuid}`);
-
-      if (processedJobs.has(jobUuid)) {
-        console.log(`Job ${jobUuid} already processed, skipping.`);
-        continue;
-      }
-
-      // Fetch payments for the job
-      const paymentsResponse = await axios.get('https://api.servicem8.com/api_1.0/jobpayment.json', {
-        headers: {
-          Authorization: authHeader,
-          Accept: 'application/json'
-        },
-        params: {
-          '$filter': `job_uuid eq '${jobUuid}'`
-        }
-      });
-
-      const payments = paymentsResponse.data;
-      console.log(`Found ${payments.length} payment records for job ${jobUuid}`);
-
-      if (payments.length > 0) {
-        // Payment exists, assume the job is paid
-        const payment = payments[0];
-        const companyUuid = job.company_uuid;
-        const paymentDate = payment.date_paid || payment.payment_date || 'not available';
-        console.log(`Payment found for job ${jobUuid}: Amount ${payment.amount}, Date ${paymentDate}`);
-
-        // Fetch the company details to get the email
-        const companyResponse = await axios.get(`https://api.servicem8.com/api_1.0/companycontact.json`, {
-          headers: {
-            Authorization: authHeader,
-            Accept: 'application/json'
-          },
-          params: {
-            '$filter': `company_uuid eq '${companyUuid}'`
-          }
-        });
-
-        const company = companyResponse.data;
-        console.log('Company contacts response:', company);
-        const primaryContact = company.find(c => c.email) || {};
-        const clientEmail = (primaryContact.email || '').trim().toLowerCase();
-        console.log(`Extracted client email: ${clientEmail}`);
-        console.log(`Fetched company email for job ${jobUuid}: ${clientEmail}`);
-
-        // Extract GHL Contact ID from job description, with fallback
-        let ghlContactId = '';
-        if (job.job_description) {
-          const ghlContactIdMatch = job.job_description.match(/GHL Contact ID: ([a-zA-Z0-9]+)/);
-          ghlContactId = ghlContactIdMatch ? ghlContactIdMatch[1] : '';
-        } else {
-          console.log(`Job description is undefined for job ${jobUuid}, GHL Contact ID not found`);
-        }
-
-        // Trigger GHL webhook (Workflow 2)
-        console.log(`Triggering GHL webhook for job ${jobUuid} with clientEmail: ${clientEmail} and ghlContactId: ${ghlContactId}`);
-        await axios.post(
-          GHL_WEBHOOK_URL,
-          {
-            jobUuid: jobUuid,
-            clientEmail: clientEmail || '',
-            ghlContactId: ghlContactId,
-            status: 'Invoice Paid'
-          },
-          {
-            headers: {
-              Authorization: `Bearer ${GHL_API_KEY}`,
-              'Content-Type': 'application/json'
-            }
-          }
-        );
-
-        console.log(`Triggered GHL webhook for job ${jobUuid}`);
-        processedJobs.add(jobUuid); // Mark as processed
-      }
-    }
-  } catch (error) {
-    console.error('Error checking payment status:', error.response ? error.response.data : error.message);
-  }
-};
-
 // Temporary endpoint to manually trigger payment polling
 app.get('/test-payment-check', async (req, res) => {
   await checkPaymentStatus();
@@ -398,13 +411,13 @@ app.get('/test-contact-check', async (req, res) => {
   res.send('Contact check triggered');
 });
 
-// Schedule polling for contacts every 5 minutes
+// Schedule polling for contacts every 20 minutes
 cron.schedule('*/20 * * * *', () => {
   console.log('Polling ServiceM8 for new contacts...');
   checkNewContacts();
 });
 
-// Schedule polling for payments every 5 minutes
+// Schedule polling for payments every 20 minutes
 cron.schedule('*/20 * * * *', () => {
   console.log('Polling ServiceM8 for completed jobs and paid payments...');
   checkPaymentStatus();
