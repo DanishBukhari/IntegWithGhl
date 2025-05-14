@@ -64,7 +64,7 @@ const checkNewContacts = async () => {
         Accept: 'application/json'
       },
       params: {
-        '$filter': `edit_date ge '${lastPollDate}'`
+        '$filter': `edit_date  '${lastPollDate}'`
       }
     });
 
@@ -198,7 +198,7 @@ const checkNewJobs = async () => {
         Accept: 'application/json'
       },
       params: {
-        '$filter': `edit_date ge '${lastPollDate}'`
+        '$filter': `edit_date '${lastPollDate}'`
       }
     });
 
