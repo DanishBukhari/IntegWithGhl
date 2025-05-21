@@ -6,6 +6,7 @@ const fs = require('fs').promises;
 const moment = require('moment-timezone');
 const multer = require('multer');
 const FormData = require('form-data');
+const path = require('path');
 
 dotenv.config();
 
@@ -25,11 +26,9 @@ const PORT = process.env.PORT || 3000;
 // Base64 encode credentials for HTTP Basic Auth
 const authHeader = 'Basic ' + Buffer.from(`${SERVICE_M8_USERNAME}:${SERVICE_M8_PASSWORD}`).toString('base64');
 
-// Store processed UUIDs, pipeline IDs, and queue UUID
+// Store processed UUIDs and queue UUID
 let processedJobs = new Set();
 let processedContacts = new Set();
-let pipelineId = null;
-let pipelineStageId = null;
 let quotesNewQueueUuid = null;
 const STATE_FILE = 'state.json';
 
@@ -65,7 +64,7 @@ async function getQuotesNewQueueUuid() {
   }
 
   try {
-    const response = await axios.get('https://api.servicem8.com/api_1.0/queue.json', {
+    const response = await axios.get('https://api.servicem8.com/api_1.0/jobqueues.json', {
       headers: {
         Authorization: authHeader,
         Accept: 'application/json',
@@ -90,47 +89,6 @@ async function getQuotesNewQueueUuid() {
       error.response ? error.response.data : error.message
     );
     return null;
-  }
-}
-
-// Fetch GHL pipeline and stage IDs
-async function getPipelineAndStageIds() {
-  if (pipelineId && pipelineStageId) {
-    return { pipelineId, pipelineStageId };
-  }
-
-  try {
-    const response = await axios.get('https://rest.gohighlevel.com/v1/pipelines/', {
-      headers: {
-        Authorization: `Bearer ${GHL_API_KEY}`,
-        Accept: 'application/json',
-      },
-    });
-
-    const pipelines = response.data.pipelines || [];
-    console.log(`Fetched ${pipelines.length} pipelines from GHL`);
-
-    for (const pipeline of pipelines) {
-      const stages = pipeline.stages || [];
-      const stage = stages.find(
-        (s) => (s.name || '').toLowerCase().trim() === 'create job in servicem8'
-      );
-      if (stage) {
-        pipelineId = pipeline.id;
-        pipelineStageId = stage.id;
-        console.log(`Found pipeline: ${pipelineId}, stage: ${pipelineStageId} for "Create Job in ServiceM8"`);
-        return { pipelineId, pipelineStageId };
-      }
-    }
-
-    console.error('No pipeline with stage "Create Job in ServiceM8" found');
-    return { pipelineId: null, pipelineStageId: null };
-  } catch (error) {
-    console.error(
-      'Error fetching GHL pipelines:',
-      error.response ? error.response.data : error.message
-    );
-    return { pipelineId: null, pipelineStageId: null };
   }
 }
 
@@ -315,9 +273,10 @@ const checkPaymentStatus = async () => {
 
       const payments = paymentsResponse.data;
       console.log(`Found ${payments.length} payment records for job ${jobUuid}`);
+      console.log(`Payments for job ${jobUuid}: ${JSON.stringify(payments)}`);
 
       // Filter for paid payments
-      const paidPayments = payments.filter(p => p.date_paid);
+      const paidPayments = payments.filter(p => p.date_paid || p.payment_date);
       if (paidPayments.length === 0) {
         console.log(`No paid payments found for job ${jobUuid}, skipping.`);
         continue;
@@ -331,7 +290,7 @@ const checkPaymentStatus = async () => {
       if (hasReviewBadge) {
         const payment = paidPayments[0];
         const companyUuid = job.company_uuid;
-        const paymentDate = payment.date_paid || 'not available';
+        const paymentDate = payment.date_paid || payment.payment_date || 'not available';
         console.log(`Paid payment found for job ${jobUuid}: Amount ${payment.amount}, Date ${paymentDate}`);
 
         const companyResponse = await axios.get(
@@ -395,112 +354,6 @@ const checkPaymentStatus = async () => {
   } catch (error) {
     console.error(
       'Error checking payment status:',
-      error.response ? error.response.data : error.message
-    );
-  }
-};
-
-// Sync new ServiceM8 jobs to GHL
-const syncNewJobs = async () => {
-  try {
-    console.log('Syncing new jobs from ServiceM8 to GHL...');
-    const lastPollTimestamp = await loadState();
-    const currentTimestamp = Date.now();
-
-    const twentyMinutesAgo = moment().tz('Australia/Perth').subtract(20, 'minutes').format('YYYY-MM-DD HH:mm:ss');
-    const filter = `$filter=edit_date gt '${twentyMinutesAgo}'`;
-
-    const jobsResponse = await axios.get(`https://api.servicem8.com/api_1.0/job.json?${filter}`, {
-      headers: {
-        Authorization: authHeader,
-        Accept: 'application/json',
-      },
-    });
-
-    const jobs = jobsResponse.data;
-    console.log(`Fetched ${jobs.length} new or updated jobs from ServiceM8`);
-
-    for (const job of jobs) {
-      const jobUuid = job.uuid;
-      if (processedJobs.has(jobUuid)) {
-        continue;
-      }
-
-      let ghlContactId = '';
-      if (job.job_description) {
-        const ghlContactIdMatch = job.job_description.match(/GHL Contact ID: ([a-zA-Z0-9]+)/);
-        ghlContactId = ghlContactIdMatch ? ghlContactIdMatch[1] : '';
-      }
-
-      if (!ghlContactId) {
-        console.log(`No GHL Contact ID found for job ${jobUuid}, skipping.`);
-        continue;
-      }
-
-      // Fetch pipeline and stage IDs
-      const { pipelineId: fetchedPipelineId, pipelineStageId: fetchedPipelineStageId } = await getPipelineAndStageIds();
-      if (!fetchedPipelineId || !fetchedPipelineStageId) {
-        console.error(`Cannot create opportunity for job ${jobUuid}: Pipeline or stage ID missing`);
-        continue;
-      }
-
-      try {
-
-        // Sync job photos to GHL contact
-        const attachmentsResponse = await axios.get('https://api.servicem8.com/api_1.0/Attachment.json', {
-          headers: {
-            Authorization: authHeader,
-            Accept: 'application/json',
-          },
-          params: {
-            '$filter': `related_object eq 'job' and related_object_uuid eq '${jobUuid}'`
-          }
-        });
-
-        const attachments = attachmentsResponse.data || [];
-        console.log(`Found ${attachments.length} attachments for job ${jobUuid}`);
-
-        for (const attachment of attachments) {
-          const attachmentUrl = attachment.url;
-          const filename = attachment.name || `attachment-${attachment.uuid}.jpg`;
-
-          try {
-            const photoResponse = await axios.get(attachmentUrl, { responseType: 'stream' });
-            const form = new FormData();
-            form.append('file', photoResponse.data, { filename });
-
-            await axios.post(
-              `https://rest.gohighlevel.com/v1/contacts/${ghlContactId}/files`,
-              form,
-              {
-                headers: {
-                  ...form.getHeaders(),
-                  Authorization: `Bearer ${GHL_API_KEY}`,
-                },
-              }
-            );
-            console.log(`Synced photo ${attachmentUrl} to GHL contact ${ghlContactId}`);
-          } catch (photoError) {
-            console.error(
-              `Error syncing photo ${attachmentUrl} to GHL:`,
-              photoError.response ? photoError.response.data : photoError.message
-            );
-          }
-        }
-      } catch (error) {
-        console.error(
-          `Error processing job ${jobUuid}:`,
-          error.response ? error.response.data : error.message
-        );
-      }
-
-      processedJobs.add(jobUuid);
-    }
-
-    await saveState(currentTimestamp);
-  } catch (error) {
-    console.error(
-      'Error syncing new jobs:',
       error.response ? error.response.data : error.message
     );
   }
@@ -663,21 +516,43 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
 
       for (const photoUrl of photoUrls) {
         const filename = photoUrl.split('/').pop() || `photo-${Date.now()}.jpg`;
+        const ext = path.extname(filename).toLowerCase() || '.jpg';
+        const fileType = ext === '.png' ? 'image/png' : 'image/jpeg';
         try {
           const photoResponse = await axios.get(photoUrl, { responseType: 'stream' });
-          const form = new FormData();
-          form.append('related_object', 'job');
-          form.append('related_object_uuid', jobUuid);
-          form.append('attachment', photoResponse.data, { filename });
+          // Upload to job
+          const jobForm = new FormData();
+          jobForm.append('related_object', 'job');
+          jobForm.append('related_object_uuid', jobUuid);
+          jobForm.append('attachment_name', filename);
+          jobForm.append('file_type', fileType);
+          jobForm.append('attachment', photoResponse.data, { filename });
 
-          const attachmentResponse = await axios.post('https://api.servicem8.com/api_1.0/Attachment.json', form, {
+          const jobAttachmentResponse = await axios.post('https://api.servicem8.com/api_1.0/Attachment.json', jobForm, {
             headers: {
-              ...form.getHeaders(),
+              ...jobForm.getHeaders(),
               Authorization: authHeader,
             },
           });
 
-          console.log(`Photo added to job ${jobUuid} from URL ${photoUrl}, attachment UUID: ${attachmentResponse.headers['x-record-uuid']}`);
+          console.log(`Photo added to job ${jobUuid} from URL ${photoUrl}, attachment UUID: ${jobAttachmentResponse.headers['x-record-uuid']}`);
+
+          // Upload to company
+          const companyForm = new FormData();
+          companyForm.append('related_object', 'company');
+          companyForm.append('related_object_uuid', companyUuid);
+          companyForm.append('attachment_name', filename);
+          companyForm.append('file_type', fileType);
+          companyForm.append('attachment', photoResponse.data, { filename });
+
+          const companyAttachmentResponse = await axios.post('https://api.servicem8.com/api_1.0/Attachment.json', companyForm, {
+            headers: {
+              ...companyForm.getHeaders(),
+              Authorization: authHeader,
+            },
+          });
+
+          console.log(`Photo added to company ${companyUuid} from URL ${photoUrl}, attachment UUID: ${companyAttachmentResponse.headers['x-record-uuid']}`);
         } catch (photoError) {
           console.error(
             'Error adding photo from URL:',
@@ -691,19 +566,39 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
     if (req.files && req.files.length > 0) {
       for (const file of req.files) {
         const filename = file.originalname || `photo-${Date.now()}.jpg`;
-        const form = new FormData();
-        form.append('related_object', 'job');
-        form.append('related_object_uuid', jobUuid);
-        form.append('attachment', fs.createReadStream(file.path), { filename });
+        const ext = path.extname(filename).toLowerCase() || '.jpg';
+        const fileType = ext === '.png' ? 'image/png' : 'image/jpeg';
+        const jobForm = new FormData();
+        jobForm.append('related_object', 'job');
+        jobForm.append('related_object_uuid', jobUuid);
+        jobForm.append('attachment_name', filename);
+        jobForm.append('file_type', fileType);
+        jobForm.append('attachment', fs.createReadStream(file.path), { filename });
 
         try {
-          const attachmentResponse = await axios.post('https://api.servicem8.com/api_1.0/Attachment.json', form, {
+          const jobAttachmentResponse = await axios.post('https://api.servicem8.com/api_1.0/Attachment.json', jobForm, {
             headers: {
-              ...form.getHeaders(),
+              ...jobForm.getHeaders(),
               Authorization: authHeader,
             },
           });
-          console.log(`Photo added to job ${jobUuid} from file upload, attachment UUID: ${attachmentResponse.headers['x-record-uuid']}`);
+          console.log(`Photo added to job ${jobUuid} from file upload, attachment UUID: ${jobAttachmentResponse.headers['x-record-uuid']}`);
+
+          // Upload to company
+          const companyForm = new FormData();
+          companyForm.append('related_object', 'company');
+          companyForm.append('related_object_uuid', companyUuid);
+          companyForm.append('attachment_name', filename);
+          companyForm.append('file_type', fileType);
+          companyForm.append('attachment', fs.createReadStream(file.path), { filename });
+
+          const companyAttachmentResponse = await axios.post('https://api.servicem8.com/api_1.0/Attachment.json', companyForm, {
+            headers: {
+              ...companyForm.getHeaders(),
+              Authorization: authHeader,
+            },
+          });
+          console.log(`Photo added to company ${companyUuid} from file upload, attachment UUID: ${companyAttachmentResponse.headers['x-record-uuid']}`);
         } catch (photoError) {
           console.error(
             'Error adding photo from file:',
@@ -736,11 +631,6 @@ app.get('/test-contact-check', async (req, res) => {
   res.send('Contact check triggered');
 });
 
-app.get('/test-sync-jobs', async (req, res) => {
-  await syncNewJobs();
-  res.send('Job sync triggered');
-});
-
 // Schedule polling
 cron.schedule('*/20 * * * *', () => {
   console.log('Polling ServiceM8 for new contacts...');
@@ -750,11 +640,6 @@ cron.schedule('*/20 * * * *', () => {
 cron.schedule('*/20 * * * *', () => {
   console.log('Polling ServiceM8 for completed jobs and paid payments...');
   checkPaymentStatus();
-});
-
-cron.schedule('*/20 * * * *', () => {
-  console.log('Syncing new jobs from ServiceM8 to GHL...');
-  syncNewJobs();
 });
 
 app.listen(PORT, () => {
