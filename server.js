@@ -534,44 +534,45 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
           continue;
         }
 
-        // Upload to job as note (Job Diary)
-        const uploadNote = async (attempt = 1) => {
+        // Upload to job as attachment (Attachments tab)
+        const uploadJobAttachment = async (attempt = 1) => {
           try {
-            const noteForm = new FormData();
-            noteForm.append('related_object', 'job');
-            noteForm.append('related_object_uuid', jobUuid);
-            noteForm.append('body', `Image attachment from GHL: ${filename}`);
-            noteForm.append('attachment', fs.createReadStream(tempPath), { filename, contentType: mimetype });
+            const jobForm = new FormData();
+            jobForm.append('related_object', 'job');
+            jobForm.append('related_object_uuid', jobUuid);
+            jobForm.append('attachment_name', filename);
+            jobForm.append('file_type', mimetype);
+            jobForm.append('attachment', fs.createReadStream(tempPath), { filename, contentType: mimetype });
 
-            const noteResponse = await serviceM8Api.post('/note.json', noteForm, {
+            const jobAttachmentResponse = await serviceM8Api.post('/Attachment.json', jobForm, {
               headers: {
-                ...noteForm.getHeaders(),
-                'Content-Type': `multipart/form-data; boundary=${noteForm.getBoundary()}`,
+                ...jobForm.getHeaders(),
+                'Content-Type': `multipart/form-data; boundary=${jobForm.getBoundary()}`,
               },
             });
 
             console.log(
-              `Image added to job ${jobUuid} as note from URL ${photoUrl}, note UUID: ${
-                noteResponse.headers['x-record-uuid']
+              `Image added to job ${jobUuid} as attachment from URL ${photoUrl}, attachment UUID: ${
+                jobAttachmentResponse.headers['x-record-uuid']
               }`
             );
           } catch (error) {
             console.error(
-              `Attempt ${attempt} failed to upload note for ${photoUrl}:`,
+              `Attempt ${attempt} failed to upload job attachment for ${photoUrl}:`,
               error.response ? error.response.data : error.message
             );
             if (attempt < 2) {
-              console.log(`Retrying note upload for ${photoUrl}...`);
-              await uploadNote(attempt + 1);
+              console.log(`Retrying job attachment upload for ${photoUrl}...`);
+              await uploadJobAttachment(attempt + 1);
             } else {
               throw error;
             }
           }
         };
-        await uploadNote();
+        await uploadJobAttachment();
 
         // Upload to company as attachment
-        const uploadAttachment = async (attempt = 1) => {
+        const uploadCompanyAttachment = async (attempt = 1) => {
           try {
             const companyForm = new FormData();
             companyForm.append('related_object', 'company');
@@ -594,18 +595,18 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
             );
           } catch (error) {
             console.error(
-              `Attempt ${attempt} failed to upload attachment for ${photoUrl}:`,
+              `Attempt ${attempt} failed to upload company attachment for ${photoUrl}:`,
               error.response ? error.response.data : error.message
             );
             if (attempt < 2) {
-              console.log(`Retrying attachment upload for ${photoUrl}...`);
-              await uploadAttachment(attempt + 1);
+              console.log(`Retrying company attachment upload for ${photoUrl}...`);
+              await uploadCompanyAttachment(attempt + 1);
             } else {
               throw error;
             }
           }
         };
-        await uploadAttachment();
+        await uploadCompanyAttachment();
 
       } catch (error) {
         console.error(
