@@ -276,9 +276,19 @@ const checkPaymentStatus = async () => {
       console.log(`Payments for job ${jobUuid}: ${JSON.stringify(payments)}`);
 
       // Filter for paid payments
-      const paidPayments = payments.filter(p => p.date_paid || p.payment_date);
+      const paidPayments = payments.filter(
+        p => p.active === 1 && p.amount > 0 && p.timestamp && p.timestamp !== '0000-00-00 00:00:00'
+      );
       if (paidPayments.length === 0) {
         console.log(`No paid payments found for job ${jobUuid}, skipping.`);
+        if (payments.length > 0) {
+          console.log(`Reasons for unpaid status: ${JSON.stringify(payments.map(p => ({
+            uuid: p.uuid,
+            active: p.active,
+            amount: p.amount,
+            timestamp: p.timestamp
+          })))}`);
+        }
         continue;
       }
 
@@ -290,7 +300,7 @@ const checkPaymentStatus = async () => {
       if (hasReviewBadge) {
         const payment = paidPayments[0];
         const companyUuid = job.company_uuid;
-        const paymentDate = payment.date_paid || payment.payment_date || 'not available';
+        const paymentDate = payment.timestamp || 'not available';
         console.log(`Paid payment found for job ${jobUuid}: Amount ${payment.amount}, Date ${paymentDate}`);
 
         const companyResponse = await axios.get(
@@ -590,7 +600,7 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
           companyForm.append('related_object_uuid', companyUuid);
           companyForm.append('attachment_name', filename);
           companyForm.append('file_type', fileType);
-          companyForm.append('attachment', fs.createReadStream(file.path), { filename });
+          jobForm.append('attachment', fs.createReadStream(file.path), { filename });
 
           const companyAttachmentResponse = await axios.post('https://api.servicem8.com/api_1.0/Attachment.json', companyForm, {
             headers: {
