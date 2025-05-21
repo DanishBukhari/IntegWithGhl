@@ -32,7 +32,7 @@ let pipelineId = null;
 let pipelineStageId = null;
 let quotesNewQueueUuid = null;
 const STATE_FILE = 'state.json';
-const ALLOWED_PHOTO_TYPES = ['jpg', 'jpeg', 'png'];
+const ALLOWED_PHOTO_TYPES = [];
 
 // Load polling state
 async function loadState() {
@@ -136,10 +136,10 @@ async function getPipelineAndStageIds() {
 }
 
 // Validate photo file type
-function isValidPhotoType(filename) {
-  const ext = filename.split('.').pop().toLowerCase();
-  return ALLOWED_PHOTO_TYPES.includes(ext);
-}
+// function isValidPhotoType(filename) {
+//   const ext = filename.split('.').pop().toLowerCase();
+//   return ALLOWED_PHOTO_TYPES.includes(ext);
+// }
 
 // Check new ServiceM8 contacts and sync to GHL
 const checkNewContacts = async () => {
