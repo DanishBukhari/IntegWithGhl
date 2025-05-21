@@ -12,7 +12,7 @@ dotenv.config();
 const app = express();
 app.use(express.json());
 
-// Configure multer for file uploads (fallback if GHL sends files directly)
+// Configure multer for file uploads (for GHL form file attachments)
 const upload = multer({ dest: 'uploads/' });
 
 const SERVICE_M8_USERNAME = process.env.SERVICE_M8_USERNAME;
@@ -298,98 +298,6 @@ const checkPaymentStatus = async () => {
   }
 };
 
-// Sync new ServiceM8 jobs to GHL
-const syncNewJobs = async () => {
-  try {
-    console.log('Syncing new jobs from ServiceM8 to GHL...');
-    const lastPollTimestamp = await loadState();
-    const currentTimestamp = Date.now();
-
-    const twentyMinutesAgo = moment().tz('Australia/Perth').subtract(20, 'minutes').format('YYYY-MM-DD HH:mm:ss');
-    const filter = `$filter=edit_date gt '${twentyMinutesAgo}'`;
-
-    const jobsResponse = await axios.get(`https://api.servicem8.com/api_1.0/job.json?${filter}`, {
-      headers: {
-        Authorization: authHeader,
-        Accept: 'application/json',
-      },
-    });
-
-    const jobs = jobsResponse.data;
-    console.log(`Fetched ${jobs.length} new or updated jobs from ServiceM8`);
-
-    for (const job of jobs) {
-      const jobUuid = job.uuid;
-      if (processedJobs.has(jobUuid)) {
-        continue;
-      }
-
-      let ghlContactId = '';
-      if (job.job_description) {
-        const ghlContactIdMatch = job.job_description.match(/GHL Contact ID: ([a-zA-Z0-9]+)/);
-        ghlContactId = ghlContactIdMatch ? ghlContactIdMatch[1] : '';
-      }
-
-      if (!ghlContactId) {
-        console.log(`No GHL Contact ID found for job ${jobUuid}, skipping.`);
-        continue;
-      }
-
-      try {
-        const opportunityResponse = await axios.post(
-          'https://rest.gohighlevel.com/v1/pipelines/opportunities/',
-          {
-            contactId: ghlContactId,
-            name: job.job_description || 'New Job',
-            status: 'open',
-            pipelineId: 'your_pipeline_id', // Replace with your GHL pipeline ID
-            pipelineStageId: 'your_pipeline_stage_id' // Replace with your GHL pipeline stage ID
-          },
-          {
-            headers: {
-              Authorization: `Bearer ${GHL_API_KEY}`,
-              'Content-Type': 'application/json',
-              Accept: 'application/json',
-            },
-          }
-        );
-
-        const opportunityId = opportunityResponse.data.id;
-        console.log(`Created GHL opportunity: ${opportunityId} for job ${jobUuid}`);
-
-        // Add "new quotes" tag
-        await axios.post(
-          `https://rest.gohighlevel.com/v1/contacts/${ghlContactId}/tags`,
-          {
-            tags: ['new quotes'],
-          },
-          {
-            headers: {
-              Authorization: `Bearer ${GHL_API_KEY}`,
-              'Content-Type': 'application/json',
-              Accept: 'application/json',
-            },
-          }
-        );
-      } catch (error) {
-        console.error(
-          `Error creating GHL opportunity for job ${jobUuid}:`,
-          error.response ? error.response.data : error.message
-        );
-      }
-
-      processedJobs.add(jobUuid);
-    }
-
-    await saveState(currentTimestamp);
-  } catch (error) {
-    console.error(
-      'Error syncing new jobs:',
-      error.response ? error.response.data : error.message
-    );
-  }
-};
-
 // Endpoint for GHL to create a job in ServiceM8
 app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
   try {
@@ -407,7 +315,7 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
     });
 
     const companies = companiesResponse.data;
-    console.log(`Fetched ${companies.length} companies from ServiceM8`);
+    console.log(`Fetched ${companies.length} companies from ServiceAmazing`);
 
     let companyUuid;
     const fullName = `${firstName} ${lastName}`.toLowerCase().trim();
@@ -497,7 +405,7 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
     const jobData = {
       company_uuid: companyUuid,
       status: 'Quote',
-      badges: ['Review Request'],
+      badges: JSON.stringify(['Review Request']),
       job_description: `GHL Contact ID: ${ghlContactId}\n${jobDescription || ''}`,
     };
 
@@ -548,7 +456,7 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
       }
     }
 
-    // Handle direct file uploads (fallback)
+    // Handle direct file uploads from GHL form
     if (req.files && req.files.length > 0) {
       for (const file of req.files) {
         const form = new FormData();
@@ -595,11 +503,6 @@ app.get('/test-contact-check', async (req, res) => {
   res.send('Contact check triggered');
 });
 
-app.get('/test-sync-jobs', async (req, res) => {
-  await syncNewJobs();
-  res.send('Job sync triggered');
-});
-
 // Schedule polling
 cron.schedule('*/20 * * * *', () => {
   console.log('Polling ServiceM8 for new contacts...');
@@ -609,11 +512,6 @@ cron.schedule('*/20 * * * *', () => {
 cron.schedule('*/20 * * * *', () => {
   console.log('Polling ServiceM8 for completed jobs and paid payments...');
   checkPaymentStatus();
-});
-
-cron.schedule('*/20 * * * *', () => {
-  console.log('Syncing new jobs from ServiceM8 to GHL...');
-  syncNewJobs();
 });
 
 app.listen(PORT, () => {
