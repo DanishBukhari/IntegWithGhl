@@ -15,7 +15,7 @@ app.get('/activate-addon', (req, res) => {
     response_type: 'code',
     client_id: CLIENT_ID,
     redirect_uri: REDIRECT_URI,
-    scope: 'company staff job customer',
+    scope: 'write_companies read_job read_companies',
   });
   return res.redirect(authorizationUrl);
 });

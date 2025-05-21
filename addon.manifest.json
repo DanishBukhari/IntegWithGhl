@@ -6,6 +6,6 @@
   "supportURL": "https://everythingainow.com",
   "activationURL": "https://integwithservicem8-b0957504c647.herokuapp.com/activate-addon",
   "oauth": {
-    "scope": "company staff job customer"
+    "scope": "write_companies  read_job"
   }
 }
