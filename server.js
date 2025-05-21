@@ -36,8 +36,11 @@ async function loadTokens() {
     const tokens = JSON.parse(data);
     accessToken = tokens.access_token;
     refreshToken = tokens.refresh_token;
+    console.log('Tokens loaded successfully');
   } catch (error) {
     console.log('No saved tokens found');
+    accessToken = null;
+    refreshToken = null;
   }
 }
 
@@ -46,6 +49,7 @@ async function saveTokens(tokens) {
   await fs.writeFile(TOKEN_FILE, JSON.stringify(tokens));
   accessToken = tokens.access_token;
   refreshToken = tokens.refresh_token;
+  console.log('Tokens saved successfully');
 }
 
 // Refresh OAuth token
@@ -72,15 +76,20 @@ const serviceM8Api = axios.create({
   headers: { Accept: 'application/json' },
 });
 
-serviceM8Api.interceptors.request.use(async (config) => {
-  if (!accessToken) {
-    await loadTokens();
-  }
-  if (accessToken) {
-    config.headers.Authorization = `Bearer ${accessToken}`;
-  }
-  return config;
-}, (error) => Promise.reject(error));
+serviceM8Api.interceptors.request.use(
+  async (config) => {
+    if (!accessToken) {
+      await loadTokens();
+    }
+    if (accessToken) {
+      config.headers.Authorization = `Bearer ${accessToken}`;
+    } else {
+      console.warn('No access token available for request');
+    }
+    return config;
+  },
+  (error) => Promise.reject(error)
+);
 
 serviceM8Api.interceptors.response.use(
   (response) => response,
@@ -136,7 +145,7 @@ async function getQuotesNewQueueUuid() {
   }
 
   try {
-    const response = await serviceM8Api.get('/jobqueues.json');
+    const response = await serviceM8Api.get('/queue.json');
     const queues = response.data || [];
     console.log(`Fetched ${queues.length} queues from ServiceM8`);
 
@@ -155,12 +164,13 @@ async function getQuotesNewQueueUuid() {
   }
 }
 
-// OAuth routes
-app.get('/install', (req, res) => {
-  const authUrl = `https://api.servicem8.com/oauth/authorize?client_id=${SERVICE_M8_CLIENT_ID}&redirect_uri=${encodeURIComponent(SERVICE_M8_REDIRECT_URI)}&response_type=code&scope=read_companies write_companies read_companycontacts write_companycontacts read_jobs write_jobs read_jobqueues read_jobpayments read_notes write_notes read_attachments write_attachments read_badges`;
+// Add-on activation endpoint
+app.get('/activate-addon', async (req, res) => {
+  const authUrl = `https://api.servicem8.com/oauth/authorize?client_id=${SERVICE_M8_CLIENT_ID}&redirect_uri=${encodeURIComponent(SERVICE_M8_REDIRECT_URI)}&response_type=code&scope=read_companies write_companies read_companycontacts write_companycontacts read_jobs write_jobs read_queues read_jobpayments read_notes write_notes read_attachments write_attachments read_badges`;
   res.redirect(authUrl);
 });
 
+// OAuth callback
 app.get('/oauth/callback', async (req, res) => {
   const { code } = req.query;
   if (!code) {
@@ -190,12 +200,18 @@ app.get('/manifest.json', async (req, res) => {
     const manifest = await fs.readFile('manifest.json', 'utf8');
     res.json(JSON.parse(manifest));
   } catch (error) {
+    console.error('Error serving manifest:', error.message);
     res.status(500).send('Error serving manifest');
   }
 });
 
 // Check new ServiceM8 contacts and sync to GHL
 const checkNewContacts = async () => {
+  if (!accessToken) {
+    console.log('Skipping contact polling: No access token');
+    return;
+  }
+
   try {
     console.log('Polling ServiceM8 for new contacts...');
     const lastPollTimestamp = await loadState();
@@ -322,6 +338,11 @@ const checkNewContacts = async () => {
 
 // Check payment status and trigger GHL webhook
 const checkPaymentStatus = async () => {
+  if (!accessToken) {
+    console.log('Skipping payment polling: No access token');
+    return;
+  }
+
   try {
     const accountTimezone = 'Australia/Perth';
     const now = moment().tz(accountTimezone);
@@ -449,8 +470,12 @@ const checkPaymentStatus = async () => {
 
 // Endpoint for GHL to create a job in ServiceM8
 app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
+  if (!accessToken) {
+    return res.status(401).json({ error: 'ServiceM8 authorization required' });
+  }
+
   try {
-    const { firstName, lastName, email, phone, address, jobDescription, ghlContactId, photos, } = req.body;
+    const { firstName, lastName, email, phone, address, jobDescription, ghlContactId } = req.body;
 
     if (!firstName || !lastName || !email || !ghlContactId) {
       return res.status(400).json({ error: 'Missing required fields' });
@@ -493,35 +518,6 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
       companyUuid = newCompanyResponse.headers['x-record-uuid'];
       console.log(`Client created: ${companyUuid} for email ${email} with phone ${phone}`);
 
-      // Create GHL contact immediately
-      try {
-        const ghlContactResponse = await axios.post(
-          'https://rest.gohighlevel.com/v1/contacts/',
-          {
-            firstName: firstName || '',
-            lastName: lastName || '',
-            name: fullName,
-            email: email || '',
-            phone: phone || '',
-            address1: address || '',
-            source: 'ServiceM8',
-          },
-          {
-            headers: {
-              Authorization: `Bearer ${GHL_API_KEY}`,
-              'Content-Type': 'application/json',
-              Accept: 'application/json',
-            },
-          }
-        );
-        console.log(`Created GHL contact for email ${email}`);
-      } catch (error) {
-        console.error(
-          'Error creating GHL contact:',
-          error.response ? error.response.data : error.message
-        );
-      }
-
       await serviceM8Api.post('/companycontact.json', {
         company_uuid: companyUuid,
         first: firstName,
@@ -559,7 +555,7 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
       const contact = contactResponse.data.contact;
       if (contact.customFields) {
         // Assuming images are stored in a custom field (adjust field name as needed)
-        const imageField = contact.customFields.find((field) => field.name === 'Attach Photos (Optional)' || field.name === 'Images');
+        const imageField = contact.customFields.find((field) => field.name === 'Photos' || field.name === 'Images');
         if (imageField && imageField.value) {
           photoUrls = Array.isArray(imageField.value) ? imageField.value : [imageField.value];
         }
