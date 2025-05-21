@@ -1,4 +1,6 @@
 node_modules/
-addon.manifest.json
 .api/
 uploads/
+.env
+state.json
+token.json
