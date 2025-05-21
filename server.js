@@ -20,7 +20,7 @@ const SERVICE_M8_USERNAME = process.env.SERVICE_M8_USERNAME;
 const SERVICE_M8_PASSWORD = process.env.SERVICE_M8_PASSWORD;
 const GHL_API_KEY = process.env.GHL_API_KEY;
 const GHL_WEBHOOK_URL = process.env.GHL_WEBHOOK_URL;
-const REVIEW_BADGE_UUID = process.env.REVIEW_BADGE_UUID;
+const REVIEW_BADGE_UUID = "ed0b1d72-46cd-4ca4-bf06-22ca254463fb"
 const PORT = process.env.PORT || 3000;
 
 // Base64 encode credentials for HTTP Basic Auth
