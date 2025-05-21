@@ -25,11 +25,12 @@ const PORT = process.env.PORT || 3000;
 // Base64 encode credentials for HTTP Basic Auth
 const authHeader = 'Basic ' + Buffer.from(`${SERVICE_M8_USERNAME}:${SERVICE_M8_PASSWORD}`).toString('base64');
 
-// Store processed UUIDs and pipeline IDs
+// Store processed UUIDs, pipeline IDs, and queue UUID
 let processedJobs = new Set();
 let processedContacts = new Set();
 let pipelineId = null;
 let pipelineStageId = null;
+let quotesNewQueueUuid = null;
 const STATE_FILE = 'state.json';
 
 // Load polling state
@@ -55,6 +56,41 @@ async function saveState(lastPollTimestamp) {
       processedContacts: Array.from(processedContacts),
     })
   );
+}
+
+// Fetch ServiceM8 "Quotes - New" queue UUID
+async function getQuotesNewQueueUuid() {
+  if (quotesNewQueueUuid) {
+    return quotesNewQueueUuid;
+  }
+
+  try {
+    const response = await axios.get('https://api.servicem8.com/api_1.0/jobqueues.json', {
+      headers: {
+        Authorization: authHeader,
+        Accept: 'application/json',
+      },
+    });
+
+    const queues = response.data || [];
+    console.log(`Fetched ${queues.length} queues from ServiceM8`);
+
+    const queue = queues.find((q) => (q.name || '').toLowerCase().trim() === 'quotes - new');
+    if (queue) {
+      quotesNewQueueUuid = queue.uuid;
+      console.log(`Found "Quotes - New" queue UUID: ${quotesNewQueueUuid}`);
+      return quotesNewQueueUuid;
+    }
+
+    console.error('No "Quotes - New" queue found');
+    return null;
+  } catch (error) {
+    console.error(
+      'Error fetching ServiceM8 queues:',
+      error.response ? error.response.data : error.message
+    );
+    return null;
+  }
 }
 
 // Fetch GHL pipeline and stage IDs
@@ -209,6 +245,7 @@ const checkNewContacts = async () => {
             city: addressDetails.city,
             state: addressDetails.state,
             postalCode: addressDetails.postalCode,
+            source: 'ServiceM8'
           },
           {
             headers: {
@@ -311,27 +348,35 @@ const checkPaymentStatus = async () => {
           ghlContactId = ghlContactIdMatch ? ghlContactIdMatch[1] : '';
         }
 
+        const webhookPayload = {
+          jobUuid: jobUuid,
+          clientEmail: clientEmail || '',
+          ghlContactId: ghlContactId,
+          status: 'Invoice Paid'
+        };
         console.log(
-          `Triggering GHL webhook for job ${jobUuid} with clientEmail: ${clientEmail} and ghlContactId: ${ghlContactId}`
-        );
-        await axios.post(
-          GHL_WEBHOOK_URL,
-          {
-            jobUuid: jobUuid,
-            clientEmail: clientEmail || '',
-            ghlContactId: ghlContactId,
-            status: 'Invoice Paid',
-          },
-          {
-            headers: {
-              Authorization: `Bearer ${GHL_API_KEY}`,
-              'Content-Type': 'application/json',
-            },
-          }
+          `Triggering GHL webhook for job ${jobUuid} with payload: ${JSON.stringify(webhookPayload)}`
         );
 
-        console.log(`Triggered GHL webhook for job ${jobUuid}`);
-        processedJobs.add(jobUuid);
+        try {
+          const webhookResponse = await axios.post(
+            GHL_WEBHOOK_URL,
+            webhookPayload,
+            {
+              headers: {
+                Authorization: `Bearer ${GHL_API_KEY}`,
+                'Content-Type': 'application/json',
+              },
+            }
+          );
+          console.log(`GHL webhook response for job ${jobUuid}:`, webhookResponse.status, webhookResponse.data);
+          processedJobs.add(jobUuid);
+        } catch (webhookError) {
+          console.error(
+            `Failed to trigger GHL webhook for job ${jobUuid}:`,
+            webhookError.response ? webhookError.response.data : webhookError.message
+          );
+        }
       }
     }
   } catch (error) {
@@ -455,6 +500,11 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
       return res.status(500).json({ error: 'Review Request badge UUID not configured' });
     }
 
+    const queueUuid = await getQuotesNewQueueUuid();
+    if (!queueUuid) {
+      return res.status(500).json({ error: 'Failed to fetch "Quotes - New" queue UUID' });
+    }
+
     const companiesResponse = await axios.get('https://api.servicem8.com/api_1.0/company.json', {
       headers: {
         Authorization: authHeader,
@@ -511,6 +561,7 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
             email: email || '',
             phone: phone || '',
             address1: address || '',
+            source: 'ServiceM8'
           },
           {
             headers: {
@@ -553,6 +604,7 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
     const jobData = {
       company_uuid: companyUuid,
       status: 'Quote',
+      queue_uuid: queueUuid,
       badges: JSON.stringify([REVIEW_BADGE_UUID]),
       job_description: `GHL Contact ID: ${ghlContactId}\n${jobDescription || ''}`,
     };
@@ -570,13 +622,23 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
     );
 
     const jobUuid = jobResponse.headers['x-record-uuid'];
-    console.log(`Job created: ${jobUuid}`);
+    console.log(`Job created: ${jobUuid} in queue ${queueUuid}`);
 
     // Handle photo uploads from GHL form (URLs)
     if (photos) {
       let photoUrls = [];
       try {
-        photoUrls = Array.isArray(photos) ? photos : JSON.parse(photos);
+        if (typeof photos === 'string') {
+          // Handle JSON string or single URL
+          if (photos.startsWith('[') && photos.endsWith(']')) {
+            photoUrls = JSON.parse(photos);
+          } else {
+            photoUrls = [photos];
+          }
+        } else if (Array.isArray(photos)) {
+          photoUrls = photos;
+        }
+        console.log(`Parsed photo URLs: ${photoUrls}`);
       } catch (error) {
         console.error('Error parsing photos field:', error.message);
       }
@@ -585,10 +647,11 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
         try {
           const photoResponse = await axios.get(photoUrl, { responseType: 'stream' });
           const form = new FormData();
-          form.append('job_uuid', jobUuid);
-          form.append('photo', photoResponse.data);
+          form.append('related_object', 'job');
+          form.append('related_object_uuid', jobUuid);
+          form.append('attachment', photoResponse.data, { filename: 'photo.jpg' });
 
-          await axios.post('https://api.servicem8.com/api_1.0/jobphoto.json', form, {
+          await axios.post('https://api.servicem8.com/api_1.0/Attachment.json', form, {
             headers: {
               ...form.getHeaders(),
               Authorization: authHeader,
@@ -597,7 +660,7 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
           console.log(`Photo added to job ${jobUuid} from URL ${photoUrl}`);
         } catch (photoError) {
           console.error(
-            'Error adding photo:',
+            'Error adding photo from URL:',
             photoError.response ? photoError.response.data : photoError.message
           );
         }
@@ -608,8 +671,9 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
     if (req.files && req.files.length > 0) {
       for (const file of req.files) {
         const form = new FormData();
-        form.append('job_uuid', jobUuid);
-        form.append('photo', fs.createReadStream(file.path));
+        form.append('related_object', 'job');
+        form.append('related_object_uuid', jobUuid);
+        form.append('attachment', fs.createReadStream(file.path), { filename: file.originalname });
 
         try {
           await axios.post('https://api.servicem8.com/api_1.0/Attachment.json', form, {
@@ -618,10 +682,10 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
               Authorization: authHeader,
             },
           });
-          console.log(`Photo added to job ${jobUuid}`);
+          console.log(`Photo added to job ${jobUuid} from file upload`);
         } catch (photoError) {
           console.error(
-            'Error adding photo:',
+            'Error adding photo from file:',
             photoError.response ? photoError.response.data : photoError.message
           );
         } finally {
