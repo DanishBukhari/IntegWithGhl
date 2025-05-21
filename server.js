@@ -166,7 +166,7 @@ async function getQuotesNewQueueUuid() {
 
 // Add-on activation endpoint
 app.get('/activate-addon', async (req, res) => {
-  const authUrl = `https://api.servicem8.com/oauth/authorize?client_id=${SERVICE_M8_CLIENT_ID}&redirect_uri=${encodeURIComponent(SERVICE_M8_REDIRECT_URI)}&response_type=code&scope=read_companies write_companies read_companycontacts write_companycontacts read_jobs write_jobs read_queues read_jobpayments read_notes write_notes read_attachments write_attachments read_badges`;
+  const authUrl = `https://api.servicem8.com/oauth/authorize?client_id=${SERVICE_M8_CLIENT_ID}&redirect_uri=${encodeURIComponent(SERVICE_M8_REDIRECT_URI)}&response_type=code&scope=read_companies write_companies read_companycontacts write_companycontacts read_jobs write_jobs read_queue read_jobpayments read_notes write_notes read_attachments write_attachments read_badges`;
   res.redirect(authUrl);
 });
 
@@ -628,7 +628,7 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
     console.error('Error creating job:', error.response ? error.response.data : error.message);
     res.status(500).json({ error: 'Failed to create job' });
   }
-});
+})
 
 // Temporary endpoints for testing
 app.get('/test-payment-check', async (req, res) => {
