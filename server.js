@@ -32,7 +32,6 @@ let pipelineId = null;
 let pipelineStageId = null;
 let quotesNewQueueUuid = null;
 const STATE_FILE = 'state.json';
-const ALLOWED_PHOTO_TYPES = [];
 
 // Load polling state
 async function loadState() {
@@ -66,7 +65,7 @@ async function getQuotesNewQueueUuid() {
   }
 
   try {
-    const response = await axios.get('https://api.servicem8.com/api_1.0/queue.json', {
+    const response = await axios.get('https://api.servicem8.com/api_1.0/jobqueues.json', {
       headers: {
         Authorization: authHeader,
         Accept: 'application/json',
@@ -134,12 +133,6 @@ async function getPipelineAndStageIds() {
     return { pipelineId: null, pipelineStageId: null };
   }
 }
-
-// Validate photo file type
-// function isValidPhotoType(filename) {
-//   const ext = filename.split('.').pop().toLowerCase();
-//   return ALLOWED_PHOTO_TYPES.includes(ext);
-// }
 
 // Check new ServiceM8 contacts and sync to GHL
 const checkNewContacts = async () => {
@@ -323,12 +316,23 @@ const checkPaymentStatus = async () => {
       const payments = paymentsResponse.data;
       console.log(`Found ${payments.length} payment records for job ${jobUuid}`);
 
+      // Filter for paid payments
+      const paidPayments = payments.filter(p => p.date_paid);
+      if (paidPayments.length === 0) {
+        console.log(`No paid payments found for job ${jobUuid}, skipping.`);
+        continue;
+      }
+
+      // Log badge status for debugging
+      const hasReviewBadge = Array.isArray(job.badges) && job.badges.includes(REVIEW_BADGE_UUID);
+      console.log(`Job ${jobUuid} has Review Request badge (${REVIEW_BADGE_UUID}): ${hasReviewBadge}`);
+
       // Check if the job has the "Review Request" badge
-      if (payments.length > 0 && Array.isArray(job.badges) && job.badges.includes(REVIEW_BADGE_UUID)) {
-        const payment = payments[0];
+      if (hasReviewBadge) {
+        const payment = paidPayments[0];
         const companyUuid = job.company_uuid;
-        const paymentDate = payment.date_paid || payment.payment_date || 'not available';
-        console.log(`Payment found for job ${jobUuid}: Amount ${payment.amount}, Date ${paymentDate}`);
+        const paymentDate = payment.date_paid || 'not available';
+        console.log(`Paid payment found for job ${jobUuid}: Amount ${payment.amount}, Date ${paymentDate}`);
 
         const companyResponse = await axios.get(
           `https://api.servicem8.com/api_1.0/companycontact.json`,
@@ -353,32 +357,39 @@ const checkPaymentStatus = async () => {
         if (job.job_description) {
           const ghlContactIdMatch = job.job_description.match(/GHL Contact ID: ([a-zA-Z0-9]+)/);
           ghlContactId = ghlContactIdMatch ? ghlContactIdMatch[1] : '';
-        }else {
-          console.log(`Job description is undefined for job ${jobUuid}, GHL Contact ID not found`);
         }
 
-        // Trigger GHL webhook (Workflow 2)
-        console.log(`Triggering GHL webhook for job ${jobUuid} with clientEmail: ${clientEmail} and ghlContactId: ${ghlContactId}`);
-          await axios.post(
-          GHL_WEBHOOK_URL,
-          {
-            jobUuid: jobUuid,
-            clientEmail: clientEmail || '',
-            ghlContactId: ghlContactId,
-            status: 'Invoice Paid'
-          },
-          {
-            headers: {
-              Authorization: `Bearer ${GHL_API_KEY}`,
-              'Content-Type': 'application/json'
-            }
-          }
+        const webhookPayload = {
+          jobUuid: jobUuid,
+          clientEmail: clientEmail || '',
+          ghlContactId: ghlContactId,
+          status: 'Invoice Paid'
+        };
+        console.log(
+          `Triggering GHL webhook for job ${jobUuid} with payload: ${JSON.stringify(webhookPayload)}`
         );
-        console.log(`Triggered GHL webhook for job ${jobUuid}`);
-        processedJobs.add(jobUuid); // Mark as processed
-        
 
-        
+        try {
+          const webhookResponse = await axios.post(
+            GHL_WEBHOOK_URL,
+            webhookPayload,
+            {
+              headers: {
+                Authorization: `Bearer ${GHL_API_KEY}`,
+                'Content-Type': 'application/json',
+              },
+            }
+          );
+          console.log(`GHL webhook response for job ${jobUuid}: ${webhookResponse.status} ${JSON.stringify(webhookResponse.data)}`);
+          processedJobs.add(jobUuid);
+        } catch (webhookError) {
+          console.error(
+            `Failed to trigger GHL webhook for job ${jobUuid}:`,
+            webhookError.response ? `${webhookError.response.status} ${JSON.stringify(webhookError.response.data)}` : webhookError.message
+          );
+        }
+      } else {
+        console.log(`Job ${jobUuid} skipped: Missing Review Request badge`);
       }
     }
   } catch (error) {
@@ -417,7 +428,7 @@ const syncNewJobs = async () => {
 
       let ghlContactId = '';
       if (job.job_description) {
-        const ghlContactIdMatch = job.job_description.match(/G衛生 Contact ID: ([a-zA-Z0-9]+)/);
+        const ghlContactIdMatch = job.job_description.match(/GHL Contact ID: ([a-zA-Z0-9]+)/);
         ghlContactId = ghlContactIdMatch ? ghlContactIdMatch[1] : '';
       }
 
@@ -434,43 +445,6 @@ const syncNewJobs = async () => {
       }
 
       try {
-        // Create GHL opportunity
-        const opportunityResponse = await axios.post(
-          'https://rest.gohighlevel.com/v1/pipelines/opportunities/',
-          {
-            contactId: ghlContactId,
-            name: `Job ${jobUuid}`,
-            status: 'open',
-            pipelineId: fetchedPipelineId,
-            pipelineStageId: fetchedPipelineStageId
-          },
-          {
-            headers: {
-              Authorization: `Bearer ${GHL_API_KEY}`,
-              'Content-Type': 'application/json',
-              Accept: 'application/json',
-            },
-          }
-        );
-
-        const opportunityId = opportunityResponse.data.id;
-        console.log(`Created GHL opportunity: ${opportunityId} for job ${jobUuid}`);
-
-        // Add "new quotes" tag
-        await axios.post(
-          `https://rest.gohighlevel.com/v1/contacts/${ghlContactId}/tags`,
-          {
-            tags: ['new quotes'],
-          },
-          {
-            headers: {
-              Authorization: `Bearer ${GHL_API_KEY}`,
-              'Content-Type': 'application/json',
-              Accept: 'application/json',
-            },
-          }
-        );
-        console.log(`Added "new quotes" tag to contact ${ghlContactId}`);
 
         // Sync job photos to GHL contact
         const attachmentsResponse = await axios.get('https://api.servicem8.com/api_1.0/Attachment.json', {
@@ -489,10 +463,6 @@ const syncNewJobs = async () => {
         for (const attachment of attachments) {
           const attachmentUrl = attachment.url;
           const filename = attachment.name || `attachment-${attachment.uuid}.jpg`;
-          if (!isValidPhotoType(filename)) {
-            console.log(`Skipping attachment ${attachmentUrl}: Invalid file type`);
-            continue;
-          }
 
           try {
             const photoResponse = await axios.get(attachmentUrl, { responseType: 'stream' });
@@ -693,11 +663,6 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
 
       for (const photoUrl of photoUrls) {
         const filename = photoUrl.split('/').pop() || `photo-${Date.now()}.jpg`;
-        if (!isValidPhotoType(filename)) {
-          console.log(`Skipping photo ${photoUrl}: Invalid file type`);
-          continue;
-        }
-
         try {
           const photoResponse = await axios.get(photoUrl, { responseType: 'stream' });
           const form = new FormData();
@@ -725,16 +690,11 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
     // Handle direct file uploads from GHL form
     if (req.files && req.files.length > 0) {
       for (const file of req.files) {
-        if (!isValidPhotoType(file.originalname)) {
-          console.log(`Skipping file ${file.originalname}: Invalid file type`);
-          await fs.unlink(file.path);
-          continue;
-        }
-
+        const filename = file.originalname || `photo-${Date.now()}.jpg`;
         const form = new FormData();
         form.append('related_object', 'job');
         form.append('related_object_uuid', jobUuid);
-        form.append('attachment', fs.createReadStream(file.path), { filename: file.originalname });
+        form.append('attachment', fs.createReadStream(file.path), { filename });
 
         try {
           const attachmentResponse = await axios.post('https://api.servicem8.com/api_1.0/Attachment.json', form, {
