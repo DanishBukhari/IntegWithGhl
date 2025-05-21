@@ -23,6 +23,12 @@ const GHL_API_KEY = process.env.GHL_API_KEY;
 const GHL_WEBHOOK_URL = process.env.GHL_WEBHOOK_URL;
 const PORT = process.env.PORT || 3000;
 
+// Ensure uploads directory exists
+const UPLOADS_DIR = path.join(__dirname, 'uploads');
+fsPromises.mkdir(UPLOADS_DIR, { recursive: true }).catch((error) => {
+  console.error('Error creating uploads directory:', error.message);
+});
+
 // Axios instance with Basic Auth for ServiceM8
 const serviceM8Api = axios.create({
   baseURL: 'https://api.servicem8.com/api_1.0',
@@ -468,7 +474,7 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
 
       try {
         // Attempt to download with authentication
-        tempPath = path.join('uploads', filename);
+        tempPath = path.join(UPLOADS_DIR, filename);
         let downloadResponse;
 
         // Primary download method: Use document download endpoint with documentId
@@ -503,9 +509,22 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
           continue;
         }
 
-        // Save the image
-        await fsPromises.writeFile(tempPath, downloadResponse.data);
-        console.log(`Downloaded image to ${tempPath}`);
+        // Save the image with promise-based stream handling
+        const writer = fs.createWriteStream(tempPath);
+        downloadResponse.data.pipe(writer);
+
+        await new Promise((resolve, reject) => {
+          writer.on('finish', resolve);
+          writer.on('error', reject);
+        });
+
+        // Verify file size
+        const stats = await fsPromises.stat(tempPath);
+        console.log(`Downloaded image to ${tempPath}, size: ${stats.size} bytes`);
+        if (stats.size === 0) {
+          console.error(`Downloaded file ${tempPath} is empty`);
+          continue;
+        }
 
         // Verify file exists before upload
         try {
@@ -525,7 +544,10 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
             noteForm.append('attachment', fs.createReadStream(tempPath), { filename, contentType: mimetype });
 
             const noteResponse = await serviceM8Api.post('/note.json', noteForm, {
-              headers: noteForm.getHeaders(),
+              headers: {
+                ...noteForm.getHeaders(),
+                'Content-Type': `multipart/form-data; boundary=${noteForm.getBoundary()}`,
+              },
             });
 
             console.log(
@@ -556,10 +578,13 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
             companyForm.append('related_object_uuid', companyUuid);
             companyForm.append('attachment_name', filename);
             companyForm.append('file_type', mimetype);
-            companyForm.append('attachment', fs.createReadStream(tempPath), { filename });
+            companyForm.append('attachment', fs.createReadStream(tempPath), { filename, contentType: mimetype });
 
             const companyAttachmentResponse = await serviceM8Api.post('/Attachment.json', companyForm, {
-              headers: companyForm.getHeaders(),
+              headers: {
+                ...companyForm.getHeaders(),
+                'Content-Type': `multipart/form-data; boundary=${companyForm.getBoundary()}`,
+              },
             });
 
             console.log(
