@@ -8,7 +8,7 @@
     "type": "oauth2",
     "authorization_url": "https://api.servicem8.com/oauth/authorize",
     "token_url": "https://api.servicem8.com/oauth/token",
-    "client_id": "553267",
+    "client_id": "267187",
     "scopes": [
       "read_companies",
       "write_companies",
