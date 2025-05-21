@@ -64,7 +64,7 @@ async function getQuotesNewQueueUuid() {
   }
 
   try {
-    const response = await axios.get('https://api.servicem8.com/api_1.0/jobqueues.json', {
+    const response = await axios.get('https://api.servicem8.com/api_1.0/queue.json', {
       headers: {
         Authorization: authHeader,
         Accept: 'application/json',
