@@ -401,7 +401,7 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
       const contact = contactResponse.data.contact;
       if (contact.customFields) {
         // Assuming images are stored in a custom field (adjust field name as needed)
-        const imageField = contact.customFields.find((field) => field.name === 'Photos' || field.name === 'Images');
+        const imageField = contact.customFields.find((field) => field.name === 'Attach Photos (Optional)' || field.name === 'Images');
         if (imageField && imageField.value) {
           photoUrls = Array.isArray(imageField.value) ? imageField.value : [imageField.value];
         }
