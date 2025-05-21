@@ -2,7 +2,8 @@ const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
 const dotenv = require('dotenv');
-const fs = require('fs').promises;
+const fs = require('fs'); // Standard fs for createReadStream
+const fsPromises = require('fs').promises; // Promise-based fs for writeFile, unlink
 const moment = require('moment-timezone');
 const multer = require('multer');
 const FormData = require('form-data');
@@ -51,7 +52,7 @@ const processedGhlContactIds = new Map(); // For deduplication
 // Load polling state
 async function loadState() {
   try {
-    const data = await fs.readFile(STATE_FILE, 'utf8');
+    const data = await fsPromises.readFile(STATE_FILE, 'utf8');
     const state = JSON.parse(data);
     processedJobs = new Set(state.processedJobs || []);
     processedContacts = new Set(state.processedContacts || []);
@@ -63,7 +64,7 @@ async function loadState() {
 
 // Save polling state
 async function saveState(lastPollTimestamp) {
-  await fs.writeFile(
+  await fsPromises.writeFile(
     STATE_FILE,
     JSON.stringify({
       lastPollTimestamp,
@@ -503,8 +504,16 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
         }
 
         // Save the image
-        await fs.writeFile(tempPath, downloadResponse.data);
+        await fsPromises.writeFile(tempPath, downloadResponse.data);
         console.log(`Downloaded image to ${tempPath}`);
+
+        // Verify file exists before upload
+        try {
+          await fsPromises.access(tempPath, fs.constants.R_OK);
+        } catch (error) {
+          console.error(`File ${tempPath} is not accessible:`, error.message);
+          continue;
+        }
 
         // Upload to job as note (Job Diary)
         const uploadNote = async (attempt = 1) => {
@@ -581,7 +590,7 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
       } finally {
         if (tempPath) {
           try {
-            await fs.unlink(tempPath);
+            await fsPromises.unlink(tempPath);
             console.log(`Cleaned up temporary file ${tempPath}`);
           } catch (error) {
             console.error(`Error cleaning up ${tempPath}:`, error.message);
