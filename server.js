@@ -16,15 +16,87 @@ app.use(express.json());
 // Configure multer for file uploads (for GHL form file attachments)
 const upload = multer({ dest: 'uploads/' });
 
-const SERVICE_M8_USERNAME = process.env.SERVICE_M8_USERNAME;
-const SERVICE_M8_PASSWORD = process.env.SERVICE_M8_PASSWORD;
+const SERVICE_M8_CLIENT_ID = process.env.SERVICE_M8_CLIENT_ID;
+const SERVICE_M8_CLIENT_SECRET = process.env.SERVICE_M8_CLIENT_SECRET;
+const SERVICE_M8_REDIRECT_URI = process.env.SERVICE_M8_REDIRECT_URI;
 const GHL_API_KEY = process.env.GHL_API_KEY;
 const GHL_WEBHOOK_URL = process.env.GHL_WEBHOOK_URL;
-const REVIEW_BADGE_UUID = "ed0b1d72-46cd-4ca4-bf06-22ca254463fb";
+const REVIEW_BADGE_UUID = process.env.REVIEW_BADGE_UUID;
 const PORT = process.env.PORT || 3000;
 
-// Base64 encode credentials for HTTP Basic Auth
-const authHeader = 'Basic ' + Buffer.from(`${SERVICE_M8_USERNAME}:${SERVICE_M8_PASSWORD}`).toString('base64');
+// Token storage
+const TOKEN_FILE = 'tokens.json';
+let accessToken = null;
+let refreshToken = null;
+
+// Load tokens
+async function loadTokens() {
+  try {
+    const data = await fs.readFile(TOKEN_FILE, 'utf8');
+    const tokens = JSON.parse(data);
+    accessToken = tokens.access_token;
+    refreshToken = tokens.refresh_token;
+  } catch (error) {
+    console.log('No saved tokens found');
+  }
+}
+
+// Save tokens
+async function saveTokens(tokens) {
+  await fs.writeFile(TOKEN_FILE, JSON.stringify(tokens));
+  accessToken = tokens.access_token;
+  refreshToken = tokens.refresh_token;
+}
+
+// Refresh OAuth token
+async function refreshAccessToken() {
+  try {
+    const response = await axios.post('https://api.servicem8.com/oauth/token', {
+      grant_type: 'refresh_token',
+      client_id: SERVICE_M8_CLIENT_ID,
+      client_secret: SERVICE_M8_CLIENT_SECRET,
+      refresh_token: refreshToken,
+    });
+    await saveTokens(response.data);
+    console.log('Access token refreshed');
+    return response.data.access_token;
+  } catch (error) {
+    console.error('Error refreshing token:', error.response ? error.response.data : error.message);
+    throw error;
+  }
+}
+
+// Axios instance with OAuth
+const serviceM8Api = axios.create({
+  baseURL: 'https://api.servicem8.com/api_1.0',
+  headers: { Accept: 'application/json' },
+});
+
+serviceM8Api.interceptors.request.use(async (config) => {
+  if (!accessToken) {
+    await loadTokens();
+  }
+  if (accessToken) {
+    config.headers.Authorization = `Bearer ${accessToken}`;
+  }
+  return config;
+}, (error) => Promise.reject(error));
+
+serviceM8Api.interceptors.response.use(
+  (response) => response,
+  async (error) => {
+    if (error.response && error.response.status === 401 && refreshToken) {
+      try {
+        const newAccessToken = await refreshAccessToken();
+        error.config.headers.Authorization = `Bearer ${newAccessToken}`;
+        return serviceM8Api(error.config);
+      } catch (refreshError) {
+        return Promise.reject(refreshError);
+      }
+    }
+    return Promise.reject(error);
+  }
+);
 
 // Store processed UUIDs and queue UUID
 let processedJobs = new Set();
@@ -64,13 +136,7 @@ async function getQuotesNewQueueUuid() {
   }
 
   try {
-    const response = await axios.get('https://api.servicem8.com/api_1.0/queue.json', {
-      headers: {
-        Authorization: authHeader,
-        Accept: 'application/json',
-      },
-    });
-
+    const response = await serviceM8Api.get('/jobqueues.json');
     const queues = response.data || [];
     console.log(`Fetched ${queues.length} queues from ServiceM8`);
 
@@ -84,13 +150,49 @@ async function getQuotesNewQueueUuid() {
     console.error('No "Quotes - New" queue found');
     return null;
   } catch (error) {
-    console.error(
-      'Error fetching ServiceM8 queues:',
-      error.response ? error.response.data : error.message
-    );
+    console.error('Error fetching ServiceM8 queues:', error.response ? error.response.data : error.message);
     return null;
   }
 }
+
+// OAuth routes
+app.get('/install', (req, res) => {
+  const authUrl = `https://api.servicem8.com/oauth/authorize?client_id=${SERVICE_M8_CLIENT_ID}&redirect_uri=${encodeURIComponent(SERVICE_M8_REDIRECT_URI)}&response_type=code&scope=read_companies write_companies read_companycontacts write_companycontacts read_jobs write_jobs read_jobqueues read_jobpayments read_notes write_notes read_attachments write_attachments read_badges`;
+  res.redirect(authUrl);
+});
+
+app.get('/oauth/callback', async (req, res) => {
+  const { code } = req.query;
+  if (!code) {
+    return res.status(400).send('Authorization code missing');
+  }
+
+  try {
+    const response = await axios.post('https://api.servicem8.com/oauth/token', {
+      grant_type: 'authorization_code',
+      code,
+      client_id: SERVICE_M8_CLIENT_ID,
+      client_secret: SERVICE_M8_CLIENT_SECRET,
+      redirect_uri: SERVICE_M8_REDIRECT_URI,
+    });
+
+    await saveTokens(response.data);
+    res.send('Authorization successful! You can close this window.');
+  } catch (error) {
+    console.error('Error exchanging code for token:', error.response ? error.response.data : error.message);
+    res.status(500).send('Authorization failed');
+  }
+});
+
+// Serve manifest.json
+app.get('/manifest.json', async (req, res) => {
+  try {
+    const manifest = await fs.readFile('manifest.json', 'utf8');
+    res.json(JSON.parse(manifest));
+  } catch (error) {
+    res.status(500).send('Error serving manifest');
+  }
+});
 
 // Check new ServiceM8 contacts and sync to GHL
 const checkNewContacts = async () => {
@@ -104,16 +206,7 @@ const checkNewContacts = async () => {
     const twentyMinutesAgo = now.clone().subtract(20, 'minutes').format('YYYY-MM-DD HH:mm:ss');
     const filter = `$filter=edit_date gt '${twentyMinutesAgo}'`;
 
-    const contactsResponse = await axios.get(
-      `https://api.servicem8.com/api_1.0/companycontact.json?${filter}`,
-      {
-        headers: {
-          Authorization: authHeader,
-          Accept: 'application/json',
-        },
-      }
-    );
-
+    const contactsResponse = await serviceM8Api.get(`/companycontact.json?${filter}`);
     const contacts = contactsResponse.data;
     console.log(`Fetched ${contacts.length} new or updated contacts from ServiceM8`);
 
@@ -140,7 +233,7 @@ const checkNewContacts = async () => {
       let ghlContactId = null;
       try {
         if (email) {
-          const searchResponse = await axios.get(`https://rest.gohighlevel.com/v1/contacts/`, {
+          const searchResponse = await axios.get('https://rest.gohighlevel.com/v1/contacts/', {
             headers: {
               Authorization: `Bearer ${GHL_API_KEY}`,
               Accept: 'application/json',
@@ -167,11 +260,7 @@ const checkNewContacts = async () => {
 
       let addressDetails = {};
       try {
-        const companyResponse = await axios.get(`https://api.servicem8.com/api_1.0/company.json`, {
-          headers: {
-            Authorization: authHeader,
-            Accept: 'application/json',
-          },
+        const companyResponse = await serviceM8Api.get('/company.json', {
           params: { '$filter': `uuid eq '${company_uuid}'` },
         });
 
@@ -202,8 +291,8 @@ const checkNewContacts = async () => {
             address1: addressDetails.address1,
             city: addressDetails.city,
             state: addressDetails.state,
-            postalCode: addressDetails.postcode,
-            source: 'ServiceM8'
+            postalCode: addressDetails.postalCode,
+            source: 'ServiceM8',
           },
           {
             headers: {
@@ -227,10 +316,7 @@ const checkNewContacts = async () => {
 
     await saveState(currentTimestamp);
   } catch (error) {
-    console.error(
-      'Error polling contacts:',
-      error.response ? error.response.data : error.message
-    );
+    console.error('Error polling contacts:', error.response ? error.response.data : error.message);
   }
 };
 
@@ -242,13 +328,7 @@ const checkPaymentStatus = async () => {
     const twentyMinutesAgo = now.clone().subtract(20, 'minutes').format('YYYY-MM-DD HH:mm:ss');
     const filter = `$filter=edit_date gt '${twentyMinutesAgo}'`;
 
-    const jobsResponse = await axios.get(`https://api.servicem8.com/api_1.0/job.json?${filter}`, {
-      headers: {
-        Authorization: authHeader,
-        Accept: 'application/json',
-      },
-    });
-
+    const jobsResponse = await serviceM8Api.get(`/job.json?${filter}`);
     const jobs = jobsResponse.data;
     console.log(`Fetched ${jobs.length} new or updated jobs from ServiceM8`);
 
@@ -261,14 +341,8 @@ const checkPaymentStatus = async () => {
         continue;
       }
 
-      const paymentsResponse = await axios.get('https://api.servicem8.com/api_1.0/jobpayment.json', {
-        headers: {
-          Authorization: authHeader,
-          Accept: 'application/json',
-        },
-        params: {
-          '$filter': `job_uuid eq '${jobUuid}'`
-        },
+      const paymentsResponse = await serviceM8Api.get('/jobpayment.json', {
+        params: { '$filter': `job_uuid eq '${jobUuid}'` },
       });
 
       const payments = paymentsResponse.data;
@@ -277,24 +351,37 @@ const checkPaymentStatus = async () => {
 
       // Filter for paid payments
       const paidPayments = payments.filter(
-        p => p.active === 1 && p.amount > 0 && p.timestamp && p.timestamp !== '0000-00-00 00:00:00'
+        (p) => p.active === 1 && p.amount > 0 && p.timestamp && p.timestamp !== '0000-00-00 00:00:00'
       );
       if (paidPayments.length === 0) {
         console.log(`No paid payments found for job ${jobUuid}, skipping.`);
         if (payments.length > 0) {
-          console.log(`Reasons for unpaid status: ${JSON.stringify(payments.map(p => ({
-            uuid: p.uuid,
-            active: p.active,
-            amount: p.amount,
-            timestamp: p.timestamp
-          })))}`);
+          console.log(
+            `Reasons for unpaid status: ${JSON.stringify(
+              payments.map((p) => ({
+                uuid: p.uuid,
+                active: p.active,
+                amount: p.amount,
+                timestamp: p.timestamp,
+              }))
+            )}`
+          );
         }
         continue;
       }
 
       // Log badge status for debugging
       console.log(`Raw badges for job ${jobUuid}: ${JSON.stringify(job.badges)}`);
-      const hasReviewBadge = job.badges && Array.isArray(job.badges) && job.badges.includes(REVIEW_BADGE_UUID);
+      let badges = job.badges;
+      if (typeof job.badges === 'string') {
+        try {
+          badges = JSON.parse(job.badges);
+        } catch (error) {
+          console.error(`Error parsing badges for job ${jobUuid}: ${error.message}`);
+          badges = [];
+        }
+      }
+      const hasReviewBadge = Array.isArray(badges) && badges.includes(REVIEW_BADGE_UUID);
       console.log(`Job ${jobUuid} has Review Request badge (${REVIEW_BADGE_UUID}): ${hasReviewBadge}`);
 
       // Check if the job has the "Review Request" badge
@@ -304,18 +391,9 @@ const checkPaymentStatus = async () => {
         const paymentDate = payment.timestamp || 'not available';
         console.log(`Paid payment found for job ${jobUuid}: Amount ${payment.amount}, Date ${paymentDate}`);
 
-        const companyResponse = await axios.get(
-          `https://api.servicem8.com/api_1.0/companycontact.json`,
-          {
-            headers: {
-              Authorization: authHeader,
-              Accept: 'application/json',
-            },
-            params: {
-              '$filter': `company_uuid eq '${companyUuid}'`
-            },
-          }
-        );
+        const companyResponse = await serviceM8Api.get('/companycontact.json', {
+          params: { '$filter': `company_uuid eq '${companyUuid}'` },
+        });
 
         const company = companyResponse.data;
         const primaryContact = company.find((c) => c.email) || {};
@@ -333,29 +411,31 @@ const checkPaymentStatus = async () => {
           jobUuid: jobUuid,
           clientEmail: clientEmail || '',
           ghlContactId: ghlContactId,
-          status: 'Invoice Paid'
+          status: 'Invoice Paid',
         };
         console.log(
           `Triggering GHL webhook for job ${jobUuid} with payload: ${JSON.stringify(webhookPayload)}`
         );
 
         try {
-          const webhookResponse = await axios.post(
-            GHL_WEBHOOK_URL,
-            webhookPayload,
-            {
-              headers: {
-                Authorization: `Bearer ${GHL_API_KEY}`,
-                'Content-Type': 'application/json',
-              },
-            }
+          const webhookResponse = await axios.post(GHL_WEBHOOK_URL, webhookPayload, {
+            headers: {
+              Authorization: `Bearer ${GHL_API_KEY}`,
+              'Content-Type': 'application/json',
+            },
+          });
+          console.log(
+            `GHL webhook response for job ${jobUuid}: ${webhookResponse.status} ${JSON.stringify(
+              webhookResponse.data
+            )}`
           );
-          console.log(`GHL webhook response for job ${jobUuid}: ${webhookResponse.status} ${JSON.stringify(webhookResponse.data)}`);
           processedJobs.add(jobUuid);
         } catch (webhookError) {
           console.error(
             `Failed to trigger GHL webhook for job ${jobUuid}:`,
-            webhookError.response ? `${webhookError.response.status} ${JSON.stringify(webhookError.response.data)}` : webhookError.message
+            webhookError.response
+              ? `${webhookError.response.status} ${JSON.stringify(webhookError.response.data)}`
+              : webhookError.message
           );
         }
       } else {
@@ -363,17 +443,14 @@ const checkPaymentStatus = async () => {
       }
     }
   } catch (error) {
-    console.error(
-      'Error checking payment status:',
-      error.response ? error.response.data : error.message
-    );
+    console.error('Error checking payment status:', error.response ? error.response.data : error.message);
   }
 };
 
 // Endpoint for GHL to create a job in ServiceM8
 app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
   try {
-    const { firstName, lastName, email, phone, address, jobDescription, ghlContactId, photos } = req.body;
+    const { firstName, lastName, email, phone, address, jobDescription, ghlContactId, photos, } = req.body;
 
     if (!firstName || !lastName || !email || !ghlContactId) {
       return res.status(400).json({ error: 'Missing required fields' });
@@ -388,13 +465,7 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
       return res.status(500).json({ error: 'Failed to fetch "Quotes - New" queue UUID' });
     }
 
-    const companiesResponse = await axios.get('https://api.servicem8.com/api_1.0/company.json', {
-      headers: {
-        Authorization: authHeader,
-        Accept: 'application/json',
-      },
-    });
-
+    const companiesResponse = await serviceM8Api.get('/company.json');
     const companies = companiesResponse.data;
     console.log(`Fetched ${companies.length} companies from ServiceM8`);
 
@@ -418,18 +489,7 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
       );
     } else {
       console.log(`Creating new client with name ${fullName}, email ${email}, phone ${phone}`);
-      const newCompanyResponse = await axios.post(
-        'https://api.servicem8.com/api_1.0/company.json',
-        { name: fullName },
-        {
-          headers: {
-            Authorization: authHeader,
-            'Content-Type': 'application/json',
-            Accept: 'application/json',
-          },
-        }
-      );
-
+      const newCompanyResponse = await serviceM8Api.post('/company.json', { name: fullName });
       companyUuid = newCompanyResponse.headers['x-record-uuid'];
       console.log(`Client created: ${companyUuid} for email ${email} with phone ${phone}`);
 
@@ -444,7 +504,7 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
             email: email || '',
             phone: phone || '',
             address1: address || '',
-            source: 'ServiceM8'
+            source: 'ServiceM8',
           },
           {
             headers: {
@@ -462,23 +522,13 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
         );
       }
 
-      await axios.post(
-        `https://api.servicem8.com/api_1.0/companycontact.json`,
-        {
-          company_uuid: companyUuid,
-          first: firstName,
-          last: lastName,
-          email: email,
-          phone: phone,
-        },
-        {
-          headers: {
-            Authorization: authHeader,
-            'Content-Type': 'application/json',
-            Accept: 'application/json',
-          },
-        }
-      );
+      await serviceM8Api.post('/companycontact.json', {
+        company_uuid: companyUuid,
+        first: firstName,
+        last: lastName,
+        email: email,
+        phone: phone,
+      });
 
       console.log(`Contact added for client: ${companyUuid}`);
     }
@@ -489,149 +539,102 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
       status: 'Quote',
       queue_uuid: queueUuid,
       badges: JSON.stringify([REVIEW_BADGE_UUID]),
-      job_description: `GHL Contact ID: ${ghlContactId}`
+      job_description: `GHL Contact ID: ${ghlContactId}\n${jobDescription || ''}`,
     };
 
-    const jobResponse = await axios.post(
-      'https://api.servicem8.com/api_1.0/job.json',
-      jobData,
-      {
-        headers: {
-          Authorization: authHeader,
-          'Content-Type': 'application/json',
-          Accept: 'application/json',
-        },
-      }
-    );
-
+    const jobResponse = await serviceM8Api.post('/job.json', jobData);
     const jobUuid = jobResponse.headers['x-record-uuid'];
     console.log(`Job created: ${jobUuid} in queue ${queueUuid}`);
 
-    // Handle photo uploads from GHL form (URLs)
-    if (photos) {
-      let photoUrls = [];
-      try {
-        if (typeof photos === 'string') {
-          if (photos.startsWith('[') && photos.endsWith(']')) {
-            photoUrls = JSON.parse(photos);
-          } else {
-            photoUrls = [photos];
-          }
-        } else if (Array.isArray(photos)) {
-          photoUrls = photos;
-        }
-        console.log(`Parsed photo URLs: ${photoUrls}`);
-      } catch (error) {
-        console.error('Error parsing photos field:', error.message);
-      }
+    // Fetch images from GHL /contacts/{id}
+    let photoUrls = [];
+    try {
+      const contactResponse = await axios.get(`https://rest.gohighlevel.com/v1/contacts/${ghlContactId}`, {
+        headers: {
+          Authorization: `Bearer ${GHL_API_KEY}`,
+          Accept: 'application/json',
+        },
+      });
 
-      for (const photoUrl of photoUrls) {
-        const filename = photoUrl.split('/').pop() || `photo-${Date.now()}.jpg`;
-        const ext = path.extname(filename).toLowerCase() || '.jpg';
-        const fileType = ext === '.png' ? 'image/png' : 'image/jpeg';
-        try {
-          const photoResponse = await axios.get(photoUrl, { responseType: 'stream' });
-          // Upload to job
-          const jobForm = new FormData();
-          jobForm.append('related_object', 'job');
-          jobForm.append('related_object_uuid', jobUuid);
-          jobForm.append('attachment_name', filename);
-          jobForm.append('file_type', fileType);
-          jobForm.append('attachment', photoResponse.data, { filename });
-
-          const jobAttachmentResponse = await axios.post('https://api.servicem8.com/api_1.0/Attachment.json', jobForm, {
-            headers: {
-              ...jobForm.getHeaders(),
-              Authorization: authHeader,
-            },
-          });
-
-          console.log(`Photo added to job ${jobUuid} from URL ${photoUrl}, attachment UUID: ${jobAttachmentResponse.headers['x-record-uuid']}`);
-
-          // Upload to company
-          const companyForm = new FormData();
-          companyForm.append('related_object', 'company');
-          companyForm.append('related_object_uuid', companyUuid);
-          jobForm.append('attachment_name', filename);
-          jobForm.append('file_type', fileType);
-          jobForm.append('attachment', photoResponse.data, { filename });
-
-          const companyAttachmentResponse = await axios.post('https://api.servicem8.com/api_1.0/Attachment.json', companyForm, {
-            headers: {
-              ...companyForm.getHeaders(),
-              Authorization: authHeader,
-            },
-          });
-
-          console.log(`Photo added to company ${companyUuid} from URL ${photoUrl}, attachment UUID: ${companyAttachmentResponse.headers['x-record-uuid']}`);
-        } catch (photoError) {
-          console.error(
-            'Error adding photo from URL:',
-            photoError.response ? photoError.response.data : photoError.message
-          );
+      const contact = contactResponse.data.contact;
+      if (contact.customFields) {
+        // Assuming images are stored in a custom field (adjust field name as needed)
+        const imageField = contact.customFields.find((field) => field.name === 'Attach Photos (Optional)' || field.name === 'Images');
+        if (imageField && imageField.value) {
+          photoUrls = Array.isArray(imageField.value) ? imageField.value : [imageField.value];
         }
       }
+      console.log(`Fetched ${photoUrls.length} photo URLs from GHL contact ${ghlContactId}: ${photoUrls}`);
+    } catch (error) {
+      console.error(
+        'Error fetching GHL contact images:',
+        error.response ? error.response.data : error.message
+      );
     }
 
-    // Handle direct file uploads from GHL form
-    if (req.files && req.files.length > 0) {
-      for (const file of req.files) {
-        const filename = file.originalname || `photo-${Date.now()}.jpg`;
-        const ext = path.extname(filename).toLowerCase() || '.jpg';
-        const fileType = ext === '.png' ? 'image/png' : 'image/jpeg';
-        const jobForm = new FormData();
-        jobForm.append('related_object', 'job');
-        jobForm.append('related_object_uuid', jobUuid);
-        jobForm.append('attachment_name', filename);
-        jobForm.append('file_type', fileType);
-        jobForm.append('attachment', fs.createReadStream(file.path), { filename });
+    // Download and upload images to ServiceM8 as job notes
+    for (const photoUrl of photoUrls) {
+      const filename = photoUrl.split('/').pop() || `photo-${Date.now()}.jpg`;
+      const ext = path.extname(filename).toLowerCase() || '.jpg';
+      const fileType = ext === '.png' ? 'image/png' : 'image/jpeg';
+      const tempPath = path.join('uploads', filename);
 
-        try {
-          const jobAttachmentResponse = await axios.post('https://api.servicem8.com/api_1.0/Attachment.json', jobForm, {
-            headers: {
-              ...jobForm.getHeaders(),
-              Authorization: authHeader,
-            },
-          });
-          console.log(`Photo added to job ${jobUuid} from file upload, attachment UUID: ${jobAttachmentResponse.headers['x-record-uuid']}`);
+      try {
+        const photoResponse = await axios.get(photoUrl, { responseType: 'stream' });
+        await fs.writeFile(tempPath, photoResponse.data);
 
-          // Upload to company
-          const companyForm = new FormData();
-          companyForm.append('related_object', 'company');
-          companyForm.append('related_object_uuid', companyUuid);
-          companyForm.append('attachment_name', filename);
-          companyForm.append('file_type', fileType);
-          companyForm.append('attachment', fs.createReadStream(file.path), { filename });
+        // Upload to job as note
+        const noteForm = new FormData();
+        noteForm.append('related_object', 'job');
+        noteForm.append('related_object_uuid', jobUuid);
+        noteForm.append('body', `Image attachment: ${filename}`);
+        noteForm.append('attachment', fs.createReadStream(tempPath), { filename, contentType: fileType });
 
-          const companyAttachmentResponse = await axios.post('https://api.servicem8.com/api_1.0/Attachment.json', companyForm, {
-            headers: {
-              ...companyForm.getHeaders(),
-              Authorization: authHeader,
-            },
-          });
-          console.log(`Photo added to company ${companyUuid} from file upload, attachment UUID: ${companyAttachmentResponse.headers['x-record-uuid']}`);
-        } catch (photoError) {
-          console.error(
-            'Error adding photo from file:',
-            photoError.response ? photoError.response.data : photoError.message
-          );
-        } finally {
-          await fs.unlink(file.path);
-        }
+        const noteResponse = await serviceM8Api.post('/note.json', noteForm, {
+          headers: noteForm.getHeaders(),
+        });
+
+        console.log(
+          `Image added to job ${jobUuid} as note from URL ${photoUrl}, note UUID: ${
+            noteResponse.headers['x-record-uuid']
+          }`
+        );
+
+        // Optionally upload to company as attachment
+        const companyForm = new FormData();
+        companyForm.append('related_object', 'company');
+        companyForm.append('related_object_uuid', companyUuid);
+        companyForm.append('attachment_name', filename);
+        companyForm.append('file_type', fileType);
+        companyForm.append('attachment', fs.createReadStream(tempPath), { filename });
+
+        const companyAttachmentResponse = await serviceM8Api.post('/Attachment.json', companyForm, {
+          headers: companyForm.getHeaders(),
+        });
+
+        console.log(
+          `Image added to company ${companyUuid} from URL ${photoUrl}, attachment UUID: ${
+            companyAttachmentResponse.headers['x-record-uuid']
+          }`
+        );
+
+        await fs.unlink(tempPath);
+      } catch (photoError) {
+        console.error(
+          'Error processing photo from URL:',
+          photoError.response ? photoError.response.data : photoError.message
+        );
       }
     }
 
     res.status(200).json({ message: 'Job created successfully', jobUuid });
   } catch (error) {
-    console.error(
-      'Error creating job:',
-      error.response ? error.response.data : error.message
-    );
+    console.error('Error creating job:', error.response ? error.response.data : error.message);
     res.status(500).json({ error: 'Failed to create job' });
   }
 });
 
-// Temporary endpoints
+// Temporary endpoints for testing
 app.get('/test-payment-check', async (req, res) => {
   await checkPaymentStatus();
   res.send('Payment check triggered');
