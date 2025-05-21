@@ -19,14 +19,17 @@ const SERVICE_M8_USERNAME = process.env.SERVICE_M8_USERNAME;
 const SERVICE_M8_PASSWORD = process.env.SERVICE_M8_PASSWORD;
 const GHL_API_KEY = process.env.GHL_API_KEY;
 const GHL_WEBHOOK_URL = process.env.GHL_WEBHOOK_URL;
+const REVIEW_BADGE_UUID = process.env.REVIEW_BADGE_UUID;
 const PORT = process.env.PORT || 3000;
 
 // Base64 encode credentials for HTTP Basic Auth
 const authHeader = 'Basic ' + Buffer.from(`${SERVICE_M8_USERNAME}:${SERVICE_M8_PASSWORD}`).toString('base64');
 
-// Store processed UUIDs
+// Store processed UUIDs and pipeline IDs
 let processedJobs = new Set();
 let processedContacts = new Set();
+let pipelineId = null;
+let pipelineStageId = null;
 const STATE_FILE = 'state.json';
 
 // Load polling state
@@ -52,6 +55,47 @@ async function saveState(lastPollTimestamp) {
       processedContacts: Array.from(processedContacts),
     })
   );
+}
+
+// Fetch GHL pipeline and stage IDs
+async function getPipelineAndStageIds() {
+  if (pipelineId && pipelineStageId) {
+    return { pipelineId, pipelineStageId };
+  }
+
+  try {
+    const response = await axios.get('https://rest.gohighlevel.com/v1/pipelines/', {
+      headers: {
+        Authorization: `Bearer ${GHL_API_KEY}`,
+        Accept: 'application/json',
+      },
+    });
+
+    const pipelines = response.data.pipelines || [];
+    console.log(`Fetched ${pipelines.length} pipelines from GHL`);
+
+    for (const pipeline of pipelines) {
+      const stages = pipeline.stages || [];
+      const stage = stages.find(
+        (s) => (s.name || '').toLowerCase().trim() === 'create servicem8 job'
+      );
+      if (stage) {
+        pipelineId = pipeline.id;
+        pipelineStageId = stage.id;
+        console.log(`Found pipeline: ${pipelineId}, stage: ${pipelineStageId} for "Create ServiceM8 Job"`);
+        return { pipelineId, pipelineStageId };
+      }
+    }
+
+    console.error('No pipeline with stage "Create ServiceM8 Job" found');
+    return { pipelineId: null, pipelineStageId: null };
+  } catch (error) {
+    console.error(
+      'Error fetching GHL pipelines:',
+      error.response ? error.response.data : error.message
+    );
+    return { pipelineId: null, pipelineStageId: null };
+  }
 }
 
 // Check new ServiceM8 contacts and sync to GHL
@@ -236,7 +280,7 @@ const checkPaymentStatus = async () => {
       console.log(`Found ${payments.length} payment records for job ${jobUuid}`);
 
       // Check if the job has the "Review Request" badge
-      if (payments.length > 0 && Array.isArray(job.badges) && job.badges.includes('Review Request')) {
+      if (payments.length > 0 && Array.isArray(job.badges) && job.badges.includes(REVIEW_BADGE_UUID)) {
         const payment = payments[0];
         const companyUuid = job.company_uuid;
         const paymentDate = payment.date_paid || payment.payment_date || 'not available';
@@ -298,6 +342,106 @@ const checkPaymentStatus = async () => {
   }
 };
 
+// Sync new ServiceM8 jobs to GHL
+const syncNewJobs = async () => {
+  try {
+    console.log('Syncing new jobs from ServiceM8 to GHL...');
+    const lastPollTimestamp = await loadState();
+    const currentTimestamp = Date.now();
+
+    const twentyMinutesAgo = moment().tz('Australia/Perth').subtract(20, 'minutes').format('YYYY-MM-DD HH:mm:ss');
+    const filter = `$filter=edit_date gt '${twentyMinutesAgo}'`;
+
+    const jobsResponse = await axios.get(`https://api.servicem8.com/api_1.0/job.json?${filter}`, {
+      headers: {
+        Authorization: authHeader,
+        Accept: 'application/json',
+      },
+    });
+
+    const jobs = jobsResponse.data;
+    console.log(`Fetched ${jobs.length} new or updated jobs from ServiceM8`);
+
+    for (const job of jobs) {
+      const jobUuid = job.uuid;
+      if (processedJobs.has(jobUuid)) {
+        continue;
+      }
+
+      let ghlContactId = '';
+      if (job.job_description) {
+        const ghlContactIdMatch = job.job_description.match(/GHL Contact ID: ([a-zA-Z0-9]+)/);
+        ghlContactId = ghlContactIdMatch ? ghlContactIdMatch[1] : '';
+      }
+
+      if (!ghlContactId) {
+        console.log(`No GHL Contact ID found for job ${jobUuid}, skipping.`);
+        continue;
+      }
+
+      // Fetch pipeline and stage IDs
+      const { pipelineId: fetchedPipelineId, pipelineStageId: fetchedPipelineStageId } = await getPipelineAndStageIds();
+      if (!fetchedPipelineId || !fetchedPipelineStageId) {
+        console.error(`Cannot create opportunity for job ${jobUuid}: Pipeline or stage ID missing`);
+        continue;
+      }
+
+      try {
+        const opportunityResponse = await axios.post(
+          'https://rest.gohighlevel.com/v1/pipelines/opportunities/',
+          {
+            contactId: ghlContactId,
+            name: job.job_description || 'New Job',
+            status: 'open',
+            pipelineId: fetchedPipelineId,
+            pipelineStageId: fetchedPipelineStageId
+          },
+          {
+            headers: {
+              Authorization: `Bearer ${GHL_API_KEY}`,
+              'Content-Type': 'application/json',
+              Accept: 'application/json',
+            },
+          }
+        );
+
+        const opportunityId = opportunityResponse.data.id;
+        console.log(`Created GHL opportunity: ${opportunityId} for job ${jobUuid}`);
+
+        // Add "new quotes" tag
+        await axios.post(
+          `https://rest.gohighlevel.com/v1/contacts/${ghlContactId}/tags`,
+          {
+            tags: ['new quotes'],
+          },
+          {
+            headers: {
+              Authorization: `Bearer ${GHL_API_KEY}`,
+              'Content-Type': 'application/json',
+              Accept: 'application/json',
+            },
+          }
+        );
+        console.log(`Added "new quotes" tag to contact ${ghlContactId}`);
+      } catch (error) {
+        console.error(
+          `Error creating GHL opportunity for job ${jobUuid}:`,
+          error.response ? error.response.data : error.message
+        );
+      }
+
+      processedJobs.add(jobUuid);
+    }
+
+    await saveState(currentTimestamp);
+  } catch (error) {
+    console.error(
+      'Error syncing new jobs:',
+      error.response ? error.response.data : error.message
+    );
+  }
+};
+
 // Endpoint for GHL to create a job in ServiceM8
 app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
   try {
@@ -305,6 +449,10 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
 
     if (!firstName || !lastName || !email || !ghlContactId) {
       return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    if (!REVIEW_BADGE_UUID) {
+      return res.status(500).json({ error: 'Review Request badge UUID not configured' });
     }
 
     const companiesResponse = await axios.get('https://api.servicem8.com/api_1.0/company.json', {
@@ -315,7 +463,7 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
     });
 
     const companies = companiesResponse.data;
-    console.log(`Fetched ${companies.length} companies from ServiceAmazing`);
+    console.log(`Fetched ${companies.length} companies from ServiceM8`);
 
     let companyUuid;
     const fullName = `${firstName} ${lastName}`.toLowerCase().trim();
@@ -405,7 +553,7 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
     const jobData = {
       company_uuid: companyUuid,
       status: 'Quote',
-      badges: JSON.stringify(['Review Request']),
+      badges: JSON.stringify([REVIEW_BADGE_UUID]),
       job_description: `GHL Contact ID: ${ghlContactId}\n${jobDescription || ''}`,
     };
 
@@ -464,7 +612,7 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
         form.append('photo', fs.createReadStream(file.path));
 
         try {
-          await axios.post('https://api.servicem8.com/api_1.0/jobphoto.json', form, {
+          await axios.post('https://api.servicem8.com/api_1.0/Attachment.json', form, {
             headers: {
               ...form.getHeaders(),
               Authorization: authHeader,
@@ -503,6 +651,11 @@ app.get('/test-contact-check', async (req, res) => {
   res.send('Contact check triggered');
 });
 
+app.get('/test-sync-jobs', async (req, res) => {
+  await syncNewJobs();
+  res.send('Job sync triggered');
+});
+
 // Schedule polling
 cron.schedule('*/20 * * * *', () => {
   console.log('Polling ServiceM8 for new contacts...');
@@ -512,6 +665,11 @@ cron.schedule('*/20 * * * *', () => {
 cron.schedule('*/20 * * * *', () => {
   console.log('Polling ServiceM8 for completed jobs and paid payments...');
   checkPaymentStatus();
+});
+
+cron.schedule('*/20 * * * *', () => {
+  console.log('Syncing new jobs from ServiceM8 to GHL...');
+  syncNewJobs();
 });
 
 app.listen(PORT, () => {
