@@ -399,7 +399,7 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
     console.log(`Job created: ${jobUuid} in queue ${queueUuid}`);
 
     // Fetch images from GHL /contacts/{id}
-    let photoUrls = [];
+    let photoData = [];
     try {
       const contactResponse = await axios.get(`https://rest.gohighlevel.com/v1/contacts/${ghlContactId}`, {
         headers: {
@@ -411,19 +411,27 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
       const contact = contactResponse.data.contact;
       console.log(`GHL contact data: ${JSON.stringify(contact, null, 2)}`);
       if (contact.customFields) {
-        // Look for any custom field with image URLs
         for (const field of contact.customFields) {
-          if (field.value) {
-            const values = Array.isArray(field.value) ? field.value : [field.value];
-            for (const value of values) {
-              if (typeof value === 'string' && value.match(/\.(png|jpg|jpeg)$/i)) {
-                photoUrls.push(value);
+          if (field.value && typeof field.value === 'object' && !Array.isArray(field.value)) {
+            // Handle nested object with image entries
+            for (const [uuid, entry] of Object.entries(field.value)) {
+              if (
+                entry.url &&
+                entry.meta &&
+                entry.meta.mimetype &&
+                entry.meta.mimetype.match(/image\/(png|jpeg|jpg)/i)
+              ) {
+                photoData.push({
+                  url: entry.url,
+                  filename: entry.meta.originalname || `photo-${uuid}-${Date.now()}`,
+                  mimetype: entry.meta.mimetype,
+                });
               }
             }
           }
         }
       }
-      console.log(`Fetched ${photoUrls.length} photo URLs from GHL contact ${ghlContactId}: ${photoUrls}`);
+      console.log(`Fetched ${photoData.length} photos from GHL contact ${ghlContactId}:`, photoData.map(p => p.url));
     } catch (error) {
       console.error(
         'Error fetching GHL contact images:',
@@ -432,9 +440,8 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
     }
 
     // Download and upload images to ServiceM8
-    for (const photoUrl of photoUrls) {
-      let filename = photoUrl.split('/').pop() || `photo-${Date.now()}`;
-      let fileType = 'image/jpeg'; // Default
+    for (const photo of photoData) {
+      const { url: photoUrl, filename, mimetype } = photo;
       let tempPath;
 
       try {
@@ -445,9 +452,7 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
           console.log(`Skipping non-image URL ${photoUrl}: Content-Type ${contentType}`);
           continue;
         }
-        fileType = contentType;
-        const ext = contentType.includes('png') ? '.png' : '.jpg';
-        filename = filename.includes('.') ? filename : `${filename}${ext}`;
+
         tempPath = path.join('uploads', filename);
 
         // Download image
@@ -462,7 +467,7 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
             noteForm.append('related_object', 'job');
             noteForm.append('related_object_uuid', jobUuid);
             noteForm.append('body', `Image attachment from GHL: ${filename}`);
-            noteForm.append('attachment', fs.createReadStream(tempPath), { filename, contentType: fileType });
+            noteForm.append('attachment', fs.createReadStream(tempPath), { filename, contentType: mimetype });
 
             const noteResponse = await serviceM8Api.post('/note.json', noteForm, {
               headers: noteForm.getHeaders(),
@@ -495,7 +500,7 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
             companyForm.append('related_object', 'company');
             companyForm.append('related_object_uuid', companyUuid);
             companyForm.append('attachment_name', filename);
-            companyForm.append('file_type', fileType);
+            companyForm.append('file_type', mimetype);
             companyForm.append('attachment', fs.createReadStream(tempPath), { filename });
 
             const companyAttachmentResponse = await serviceM8Api.post('/Attachment.json', companyForm, {
