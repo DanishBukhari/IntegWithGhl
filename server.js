@@ -22,13 +22,22 @@ const GHL_API_KEY = process.env.GHL_API_KEY;
 const GHL_WEBHOOK_URL = process.env.GHL_WEBHOOK_URL;
 const PORT = process.env.PORT || 3000;
 
-// Axios instance with Basic Auth
+// Axios instance with Basic Auth for ServiceM8
 const serviceM8Api = axios.create({
   baseURL: 'https://api.servicem8.com/api_1.0',
   headers: { Accept: 'application/json' },
   auth: {
     username: SERVICE_M8_USERNAME,
     password: SERVICE_M8_PASSWORD,
+  },
+});
+
+// Axios instance for GHL with API key
+const ghlApi = axios.create({
+  baseURL: 'https://rest.gohighlevel.com/v1',
+  headers: {
+    Authorization: `Bearer ${GHL_API_KEY}`,
+    Accept: 'application/json',
   },
 });
 
@@ -129,11 +138,7 @@ const checkNewContacts = async () => {
       let ghlContactId = null;
       try {
         if (email) {
-          const searchResponse = await axios.get('https://rest.gohighlevel.com/v1/contacts/', {
-            headers: {
-              Authorization: `Bearer ${GHL_API_KEY}`,
-              Accept: 'application/json',
-            },
+          const searchResponse = await ghlApi.get('/contacts/', {
             params: { query: email },
           });
 
@@ -176,28 +181,18 @@ const checkNewContacts = async () => {
       }
 
       try {
-        const ghlContactResponse = await axios.post(
-          'https://rest.gohighlevel.com/v1/contacts/',
-          {
-            firstName: first || '',
-            lastName: last || '',
-            name: contactName,
-            email: email || '',
-            phone: phone || mobile || '',
-            address1: addressDetails.address1,
-            city: addressDetails.city,
-            state: addressDetails.state,
-            postalCode: addressDetails.postalCode,
-            source: 'ServiceM8 Integration',
-          },
-          {
-            headers: {
-              Authorization: `Bearer ${GHL_API_KEY}`,
-              'Content-Type': 'application/json',
-              Accept: 'application/json',
-            },
-          }
-        );
+        const ghlContactResponse = await ghlApi.post('/contacts/', {
+          firstName: first || '',
+          lastName: last || '',
+          name: contactName,
+          email: email || '',
+          phone: phone || mobile || '',
+          address1: addressDetails.address1,
+          city: addressDetails.city,
+          state: addressDetails.state,
+          postalCode: addressDetails.postalCode,
+          source: 'ServiceM8 Integration',
+        });
 
         ghlContactId = ghlContactResponse.data.contact.id;
         console.log(`Created GHL contact: ${ghlContactId} for email ${email}`);
@@ -398,156 +393,202 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
     const jobUuid = jobResponse.headers['x-record-uuid'];
     console.log(`Job created: ${jobUuid} in queue ${queueUuid}`);
 
-    // Fetch images from GHL /contacts/{id}
-    // Fetch images from GHL /contacts/{id}
-let photoData = [];
-try {
-  const contactResponse = await axios.get(`https://rest.gohighlevel.com/v1/contacts/${ghlContactId}`, {
-    headers: {
-      Authorization: `Bearer ${GHL_API_KEY}`,
-      Accept: 'application/json',
-    },
-  });
+    // Fetch images from GHL /contacts/{id} with fallbacks
+    let photoData = [];
+    try {
+      // Primary method: Fetch contact data
+      const contactResponse = await ghlApi.get(`/contacts/${ghlContactId}`);
+      const contact = contactResponse.data.contact;
+      console.log(`GHL contact data: ${JSON.stringify(contact, null, 2)}`);
 
-  const contact = contactResponse.data.contact;
-  console.log(`GHL contact data: ${JSON.stringify(contact, null, 2)}`);
+      if (contact.customField) {
+        for (const field of contact.customField) {
+          if (field.value && typeof field.value === 'object' && !Array.isArray(field.value)) {
+            // Handle nested object with image entries
+            for (const [uuid, entry] of Object.entries(field.value)) {
+              if (
+                entry.url &&
+                entry.meta &&
+                entry.meta.mimetype &&
+                entry.meta.mimetype.match(/image\/(png|jpeg|jpg)/i)
+              ) {
+                photoData.push({
+                  url: entry.url,
+                  documentId: entry.documentId,
+                  filename: entry.meta.originalname || `photo-${uuid}-${Date.now()}`,
+                  mimetype: entry.meta.mimetype,
+                });
+              }
+            }
+          }
+        }
+      } else {
+        console.log(`No customField found in GHL contact ${ghlContactId}. Available properties: ${Object.keys(contact)}`);
+      }
 
-  if (contact.customField) {
-    for (const field of contact.customField) {
-      if (field.value && typeof field.value === 'object' && !Array.isArray(field.value)) {
-        // Handle nested object with image entries
-        for (const [uuid, entry] of Object.entries(field.value)) {
-          if (
-            entry.url &&
-            entry.meta &&
-            entry.meta.mimetype &&
-            entry.meta.mimetype.match(/image\/(png|jpeg|jpg)/i)
-          ) {
-            photoData.push({
-              url: entry.url,
-              filename: entry.meta.originalname || `photo-${uuid}-${Date.now()}`,
-              mimetype: entry.meta.mimetype,
+      // Fallback 1: Try fetching attachments endpoint (if available)
+      if (photoData.length === 0) {
+        try {
+          const attachmentsResponse = await ghlApi.get(`/contacts/${ghlContactId}/attachments`);
+          const attachments = attachmentsResponse.data.attachments || [];
+          console.log(`Fetched ${attachments.length} attachments from GHL contact ${ghlContactId}`);
+
+          for (const attachment of attachments) {
+            if (
+              attachment.url &&
+              attachment.mimetype &&
+              attachment.mimetype.match(/image\/(png|jpeg|jpg)/i)
+            ) {
+              photoData.push({
+                url: attachment.url,
+                documentId: attachment.documentId || attachment.url.split('/').pop(),
+                filename: attachment.filename || `attachment-${Date.now()}.png`,
+                mimetype: attachment.mimetype,
+              });
+            }
+          }
+        } catch (attachmentError) {
+          console.log('Attachments endpoint not available or failed:', attachmentError.response ? attachmentError.response.data : attachmentError.message);
+        }
+      }
+
+      console.log(`Fetched ${photoData.length} photos from GHL contact ${ghlContactId}:`, photoData.map(p => p.url));
+    } catch (error) {
+      console.error(
+        'Error fetching GHL contact images:',
+        error.response ? error.response.data : error.message
+      );
+    }
+
+    // Download and upload images to ServiceM8
+    for (const photo of photoData) {
+      const { url: photoUrl, documentId, filename, mimetype } = photo;
+      let tempPath;
+
+      try {
+        // Attempt to download with authentication
+        tempPath = path.join('uploads', filename);
+        let downloadResponse;
+
+        // Primary download method: Use document download endpoint with documentId
+        try {
+          downloadResponse = await axios.get(`https://services.leadconnectorhq.com/documents/download/${documentId}`, {
+            headers: {
+              Authorization: `Bearer ${GHL_API_KEY}`,
+            },
+            responseType: 'stream',
+          });
+        } catch (primaryError) {
+          console.log(`Primary download failed for ${photoUrl}:`, primaryError.response ? primaryError.response.data : primaryError.message);
+
+          // Fallback 1: Try direct URL with auth
+          try {
+            downloadResponse = await axios.get(photoUrl, {
+              headers: {
+                Authorization: `Bearer ${GHL_API_KEY}`,
+              },
+              responseType: 'stream',
             });
+          } catch (fallbackError) {
+            console.error(`Fallback download failed for ${photoUrl}:`, fallbackError.response ? fallbackError.response.data : fallbackError.message);
+            continue;
+          }
+        }
+
+        // Validate content type
+        const contentType = downloadResponse.headers['content-type'] || '';
+        if (!contentType.match(/image\/(png|jpeg|jpg)/i)) {
+          console.log(`Skipping non-image URL ${photoUrl}: Content-Type ${contentType}`);
+          continue;
+        }
+
+        // Save the image
+        await fs.writeFile(tempPath, downloadResponse.data);
+        console.log(`Downloaded image to ${tempPath}`);
+
+        // Upload to job as note (Job Diary)
+        const uploadNote = async (attempt = 1) => {
+          try {
+            const noteForm = new FormData();
+            noteForm.append('related_object', 'job');
+            noteForm.append('related_object_uuid', jobUuid);
+            noteForm.append('body', `Image attachment from GHL: ${filename}`);
+            noteForm.append('attachment', fs.createReadStream(tempPath), { filename, contentType: mimetype });
+
+            const noteResponse = await serviceM8Api.post('/note.json', noteForm, {
+              headers: noteForm.getHeaders(),
+            });
+
+            console.log(
+              `Image added to job ${jobUuid} as note from URL ${photoUrl}, note UUID: ${
+                noteResponse.headers['x-record-uuid']
+              }`
+            );
+          } catch (error) {
+            console.error(
+              `Attempt ${attempt} failed to upload note for ${photoUrl}:`,
+              error.response ? error.response.data : error.message
+            );
+            if (attempt < 2) {
+              console.log(`Retrying note upload for ${photoUrl}...`);
+              await uploadNote(attempt + 1);
+            } else {
+              throw error;
+            }
+          }
+        };
+        await uploadNote();
+
+        // Upload to company as attachment
+        const uploadAttachment = async (attempt = 1) => {
+          try {
+            const companyForm = new FormData();
+            companyForm.append('related_object', 'company');
+            companyForm.append('related_object_uuid', companyUuid);
+            companyForm.append('attachment_name', filename);
+            companyForm.append('file_type', mimetype);
+            companyForm.append('attachment', fs.createReadStream(tempPath), { filename });
+
+            const companyAttachmentResponse = await serviceM8Api.post('/Attachment.json', companyForm, {
+              headers: companyForm.getHeaders(),
+            });
+
+            console.log(
+              `Image added to company ${companyUuid} from URL ${photoUrl}, attachment UUID: ${
+                companyAttachmentResponse.headers['x-record-uuid']
+              }`
+            );
+          } catch (error) {
+            console.error(
+              `Attempt ${attempt} failed to upload attachment for ${photoUrl}:`,
+              error.response ? error.response.data : error.message
+            );
+            if (attempt < 2) {
+              console.log(`Retrying attachment upload for ${photoUrl}...`);
+              await uploadAttachment(attempt + 1);
+            } else {
+              throw error;
+            }
+          }
+        };
+        await uploadAttachment();
+
+      } catch (error) {
+        console.error(
+          `Error processing photo ${filename} from URL ${photoUrl}:`,
+          error.response ? error.response.data : error.message
+        );
+      } finally {
+        if (tempPath) {
+          try {
+            await fs.unlink(tempPath);
+            console.log(`Cleaned up temporary file ${tempPath}`);
+          } catch (error) {
+            console.error(`Error cleaning up ${tempPath}:`, error.message);
           }
         }
       }
     }
-  } else {
-    console.log(`No customField found in GHL contact ${ghlContactId}. Available properties: ${Object.keys(contact)}`);
-  }
-
-  console.log(`Fetched ${photoData.length} photos from GHL contact ${ghlContactId}:`, photoData.map(p => p.url));
-} catch (error) {
-  console.error(
-    'Error fetching GHL contact images:',
-    error.response ? error.response.data : error.message
-  );
-}
-
-// Download and upload images to ServiceM8
-for (const photo of photoData) {
-  const { url: photoUrl, filename, mimetype } = photo;
-  let tempPath;
-
-  try {
-    // Validate image
-    const headResponse = await axios.head(photoUrl);
-    const contentType = headResponse.headers['content-type'] || '';
-    if (!contentType.match(/image\/(png|jpeg|jpg)/i)) {
-      console.log(`Skipping non-image URL ${photoUrl}: Content-Type ${contentType}`);
-      continue;
-    }
-
-    tempPath = path.join('uploads', filename);
-
-    // Download image
-    const photoResponse = await axios.get(photoUrl, { responseType: 'stream' });
-    await fs.writeFile(tempPath, photoResponse.data);
-    console.log(`Downloaded image to ${tempPath}`);
-
-    // Upload to job as note (Job Diary)
-    const uploadNote = async (attempt = 1) => {
-      try {
-        const noteForm = new FormData();
-        noteForm.append('related_object', 'job');
-        noteForm.append('related_object_uuid', jobUuid);
-        noteForm.append('body', `Image attachment from GHL: ${filename}`);
-        noteForm.append('attachment', fs.createReadStream(tempPath), { filename, contentType: mimetype });
-
-        const noteResponse = await serviceM8Api.post('/note.json', noteForm, {
-          headers: noteForm.getHeaders(),
-        });
-
-        console.log(
-          `Image added to job ${jobUuid} as note from URL ${photoUrl}, note UUID: ${
-            noteResponse.headers['x-record-uuid']
-          }`
-        );
-      } catch (error) {
-        console.error(
-          `Attempt ${attempt} failed to upload note for ${photoUrl}:`,
-          error.response ? error.response.data : error.message
-        );
-        if (attempt < 2) {
-          console.log(`Retrying note upload for ${photoUrl}...`);
-          await uploadNote(attempt + 1);
-        } else {
-          throw error;
-        }
-      }
-    };
-    await uploadNote();
-
-    // Upload to company as attachment
-    const uploadAttachment = async (attempt = 1) => {
-      try {
-        const companyForm = new FormData();
-        companyForm.append('related_object', 'company');
-        companyForm.append('related_object_uuid', companyUuid);
-        companyForm.append('attachment_name', filename);
-        companyForm.append('file_type', mimetype);
-        companyForm.append('attachment', fs.createReadStream(tempPath), { filename });
-
-        const companyAttachmentResponse = await serviceM8Api.post('/Attachment.json', companyForm, {
-          headers: companyForm.getHeaders(),
-        });
-
-        console.log(
-          `Image added to company ${companyUuid} from URL ${photoUrl}, attachment UUID: ${
-            companyAttachmentResponse.headers['x-record-uuid']
-          }`
-        );
-      } catch (error) {
-        console.error(
-          `Attempt ${attempt} failed to upload attachment for ${photoUrl}:`,
-          error.response ? error.response.data : error.message
-        );
-        if (attempt < 2) {
-          console.log(`Retrying attachment upload for ${photoUrl}...`);
-          await uploadAttachment(attempt + 1);
-        } else {
-          throw error;
-        }
-      }
-    };
-    await uploadAttachment();
-
-  } catch (error) {
-    console.error(
-      'Error processing photo from URL:',
-      error.response ? error.response.data : error.message
-    );
-  } finally {
-    if (tempPath) {
-      try {
-        await fs.unlink(tempPath);
-        console.log(`Cleaned up temporary file ${tempPath}`);
-      } catch (error) {
-        console.error(`Error cleaning up ${tempPath}:`, error.message);
-      }
-    }
-  }
-}
 
     res.status(200).json({ message: 'Job created successfully', jobUuid });
   } catch (error) {
