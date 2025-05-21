@@ -353,37 +353,32 @@ const checkPaymentStatus = async () => {
         if (job.job_description) {
           const ghlContactIdMatch = job.job_description.match(/GHL Contact ID: ([a-zA-Z0-9]+)/);
           ghlContactId = ghlContactIdMatch ? ghlContactIdMatch[1] : '';
+        }else {
+          console.log(`Job description is undefined for job ${jobUuid}, GHL Contact ID not found`);
         }
 
-        const webhookPayload = {
-          jobUuid: jobUuid,
-          clientEmail: clientEmail || '',
-          ghlContactId: ghlContactId,
-          status: 'Invoice Paid'
-        };
-        console.log(
-          `Triggering GHL webhook for job ${jobUuid} with payload: ${JSON.stringify(webhookPayload)}`
-        );
-
-        try {
-          const webhookResponse = await axios.post(
-            GHL_WEBHOOK_URL,
-            webhookPayload,
-            {
-              headers: {
-                Authorization: `Bearer ${GHL_API_KEY}`,
-                'Content-Type': 'application/json',
-              },
+        // Trigger GHL webhook (Workflow 2)
+        console.log(`Triggering GHL webhook for job ${jobUuid} with clientEmail: ${clientEmail} and ghlContactId: ${ghlContactId}`);
+          await axios.post(
+          GHL_WEBHOOK_URL,
+          {
+            jobUuid: jobUuid,
+            clientEmail: clientEmail || '',
+            ghlContactId: ghlContactId,
+            status: 'Invoice Paid'
+          },
+          {
+            headers: {
+              Authorization: `Bearer ${GHL_API_KEY}`,
+              'Content-Type': 'application/json'
             }
-          );
-          console.log(`GHL webhook response for job ${jobUuid}: ${webhookResponse.status} ${JSON.stringify(webhookResponse.data)}`);
-          processedJobs.add(jobUuid);
-        } catch (webhookError) {
-          console.error(
-            `Failed to trigger GHL webhook for job ${jobUuid}:`,
-            webhookError.response ? `${webhookError.response.status} ${JSON.stringify(webhookError.response.data)}` : webhookError.message
-          );
-        }
+          }
+        );
+        console.log(`Triggered GHL webhook for job ${jobUuid}`);
+        processedJobs.add(jobUuid); // Mark as processed
+        
+
+        
       }
     }
   } catch (error) {
