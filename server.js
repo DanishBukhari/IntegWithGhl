@@ -20,7 +20,7 @@ const SERVICE_M8_USERNAME = process.env.SERVICE_M8_USERNAME;
 const SERVICE_M8_PASSWORD = process.env.SERVICE_M8_PASSWORD;
 const GHL_API_KEY = process.env.GHL_API_KEY;
 const GHL_WEBHOOK_URL = process.env.GHL_WEBHOOK_URL;
-const REVIEW_BADGE_UUID = "ed0b1d72-46cd-4ca4-bf06-22ca254463fb"
+const REVIEW_BADGE_UUID = process.env.REVIEW_BADGE_UUID;
 const PORT = process.env.PORT || 3000;
 
 // Base64 encode credentials for HTTP Basic Auth
@@ -202,7 +202,7 @@ const checkNewContacts = async () => {
             address1: addressDetails.address1,
             city: addressDetails.city,
             state: addressDetails.state,
-            postalCode: addressDetails.postalCode,
+            postalCode: addressDetails.postcode,
             source: 'ServiceM8'
           },
           {
@@ -293,7 +293,8 @@ const checkPaymentStatus = async () => {
       }
 
       // Log badge status for debugging
-      const hasReviewBadge = Array.isArray(job.badges) && job.badges.includes(REVIEW_BADGE_UUID);
+      console.log(`Raw badges for job ${jobUuid}: ${JSON.stringify(job.badges)}`);
+      const hasReviewBadge = job.badges && Array.isArray(job.badges) && job.badges.includes(REVIEW_BADGE_UUID);
       console.log(`Job ${jobUuid} has Review Request badge (${REVIEW_BADGE_UUID}): ${hasReviewBadge}`);
 
       // Check if the job has the "Review Request" badge
@@ -551,9 +552,9 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
           const companyForm = new FormData();
           companyForm.append('related_object', 'company');
           companyForm.append('related_object_uuid', companyUuid);
-          companyForm.append('attachment_name', filename);
-          companyForm.append('file_type', fileType);
-          companyForm.append('attachment', photoResponse.data, { filename });
+          jobForm.append('attachment_name', filename);
+          jobForm.append('file_type', fileType);
+          jobForm.append('attachment', photoResponse.data, { filename });
 
           const companyAttachmentResponse = await axios.post('https://api.servicem8.com/api_1.0/Attachment.json', companyForm, {
             headers: {
@@ -600,7 +601,7 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
           companyForm.append('related_object_uuid', companyUuid);
           companyForm.append('attachment_name', filename);
           companyForm.append('file_type', fileType);
-          jobForm.append('attachment', fs.createReadStream(file.path), { filename });
+          companyForm.append('attachment', fs.createReadStream(file.path), { filename });
 
           const companyAttachmentResponse = await axios.post('https://api.servicem8.com/api_1.0/Attachment.json', companyForm, {
             headers: {
