@@ -15,7 +15,7 @@ const app = express();
 app.use(express.json());
 
 // Configure multer for file uploads
-const upload = multer({ dest: 'Uploads/' });
+const upload = multer({ dest: 'uploads/' });
 
 const SERVICE_M8_USERNAME = process.env.SERVICE_M8_USERNAME;
 const SERVICE_M8_PASSWORD = process.env.SERVICE_M8_PASSWORD;
@@ -255,12 +255,12 @@ const checkPaymentStatus = async () => {
         continue;
       }
 
-      // Step 3: Fetch job details to check status
+      // Step 3: Fetch job details to check status and edit_date
       let job;
       try {
         const jobResponse = await serviceM8Api.get(`/job.json?$filter=uuid eq '${jobUuid}'`);
         job = jobResponse.data[0];
-        console.log(`Fetched job ${jobUuid}: status=${job?.status}, company_uuid=${job?.company_uuid}`);
+        console.log(`Fetched job ${jobUuid}: status=${job?.status}, company_uuid=${job?.company_uuid}, edit_date=${job?.edit_date}`);
       } catch (error) {
         console.error(`Error fetching job ${jobUuid}:`, error.response ? error.response.data : error.message);
         continue;
@@ -277,11 +277,12 @@ const checkPaymentStatus = async () => {
       }
 
       // Step 5: Fetch job activities to determine completion date
-      let maxEndDate = null;
+      let completionDate = null;
       try {
         const jobActivitiesResponse = await serviceM8Api.get(`/jobactivity.json?$filter=job_uuid eq '${jobUuid}'`);
         const jobActivities = jobActivitiesResponse.data;
         console.log(`Fetched ${jobActivities.length} activities for job ${jobUuid}`);
+        let maxEndDate = null;
         for (const activity of jobActivities) {
           if (activity.end_date) {
             console.log(`Activity for job ${jobUuid}: end_date=${activity.end_date}`);
@@ -290,17 +291,24 @@ const checkPaymentStatus = async () => {
             }
           }
         }
+        if (maxEndDate) {
+          completionDate = moment(maxEndDate).tz(accountTimezone);
+          console.log(`Using job activity end_date as completion date: ${completionDate.format('YYYY-MM-DD HH:mm:ss')}`);
+        } else {
+          completionDate = moment(job.edit_date).tz(accountTimezone);
+          console.log(`No activities found, using job edit_date as completion date: ${completionDate.format('YYYY-MM-DD HH:mm:ss')}`);
+        }
       } catch (error) {
         console.error(`Error fetching job activities for job ${jobUuid}:`, error.response ? error.response.data : error.message);
-        continue;
+        completionDate = moment(job.edit_date).tz(accountTimezone);
+        console.log(`Failed to fetch activities, using job edit_date as completion date: ${completionDate.format('YYYY-MM-DD HH:mm:ss')}`);
       }
 
       // Step 6: Check if job was completed on or after May 24, 2025
-      if (!maxEndDate) {
-        console.log(`No end_date found for job ${jobUuid} activities, skipping payment ${paymentUuid}`);
+      if (!completionDate) {
+        console.log(`No completion date available for job ${jobUuid}, skipping payment ${paymentUuid}`);
         continue;
       }
-      const completionDate = moment(maxEndDate).tz(accountTimezone);
       const targetMoment = moment(targetDate).tz(accountTimezone);
       console.log(`Job ${jobUuid} completion date: ${completionDate.format('YYYY-MM-DD HH:mm:ss')}, target: ${targetMoment.format('YYYY-MM-DD HH:mm:ss')}`);
       if (!completionDate.isSameOrAfter(targetMoment)) {
@@ -601,19 +609,18 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
             attachmentForm.append('related_object', 'job');
             attachmentForm.append('related_object_uuid', jobUuid);
             attachmentForm.append('attachment_name', filename);
-            attachmentForm.append('file_type', mimetype);
-            attachmentForm.append('attachment', fs.createReadStream(tempPath), { filename, contentType: mimetype });
+            attachmentForm.append('file_type', mimetype.toLowerCase()); // Ensure lowercase (e.g., image/png)
+            attachmentForm.append('attachment', fs.createReadStream(tempPath), { filename, contentType: mimetype.toLowerCase() });
 
-            const attachmentResponse = await serviceM8Api.post('/Attachment.json', attachmentForm, {
+            const attachmentResponse = await serviceM8Api.post('/attachment.json', attachmentForm, {
               headers: {
                 ...attachmentForm.getHeaders(),
-                'Content-Type': `multipart/form-data; boundary=${attachmentForm.getBoundary()}`,
               },
             });
 
             attachmentUuid = attachmentResponse.headers['x-record-uuid'];
             console.log(
-              `Attachment added to job ${jobUuid} from URL ${photoUrl}, attachment UUID: ${attachmentUuid}`
+              `Attachment added to job ${jobUuid} from URL ${photoUrl}, attachment UUID: ${attachmentUuid}, file_type: ${mimetype.toLowerCase()}`
             );
           } catch (error) {
             console.error(
@@ -636,14 +643,14 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
             const noteForm = new FormData();
             noteForm.append('related_object', 'job');
             noteForm.append('related_object_uuid', jobUuid);
-            noteForm.append('body', `Image from GHL: ${filename} (Attachment UUID: ${attachmentUuid})`);
+            noteForm.append('body', `Image uploaded from GHL: ${filename}`);
 
             const noteResponse = await serviceM8Api.post('/note.json', noteForm, {
               headers: noteForm.getHeaders(),
             });
 
             console.log(
-              `Note added to job ${jobUuid} for attachment ${attachmentUuid}, note UUID: ${
+              `Note added to job ${jobUuid} for image ${filename}, note UUID: ${
                 noteResponse.headers['x-record-uuid']
               }`
             );
@@ -669,13 +676,12 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
             companyForm.append('related_object', 'company');
             companyForm.append('related_object_uuid', companyUuid);
             companyForm.append('attachment_name', filename);
-            companyForm.append('file_type', mimetype);
-            companyForm.append('attachment', fs.createReadStream(tempPath), { filename, contentType: mimetype });
+            companyForm.append('file_type', mimetype.toLowerCase());
+            companyForm.append('attachment', fs.createReadStream(tempPath), { filename, contentType: mimetype.toLowerCase() });
 
-            const companyAttachmentResponse = await serviceM8Api.post('/Attachment.json', companyForm, {
+            const companyAttachmentResponse = await serviceM8Api.post('/attachment.json', companyForm, {
               headers: {
                 ...companyForm.getHeaders(),
-                'Content-Type': `multipart/form-data; boundary=${companyForm.getBoundary()}`,
               },
             });
 
@@ -715,7 +721,6 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
         }
       }
     }
-
 
     console.log(`Job creation completed for job ${jobUuid}`);
     res.status(200).json({ message: 'Job created successfully', jobUuid });
