@@ -221,115 +221,77 @@ const checkNewContacts = async () => {
 // Check payment status and trigger GHL webhook
 const checkPaymentStatus = async () => {
   try {
-    const accountTimezone = 'Australia/Brisbane';
+    const accountTimezone = 'Australia/Brisbane'; // Adjust as needed
     const now = moment().tz(accountTimezone);
     const twentyMinutesAgo = now.clone().subtract(20, 'minutes').format('YYYY-MM-DD HH:mm:ss');
-    console.log(`Checking payments after ${twentyMinutesAgo} (Brisbane time)`);
-    const filter = `$filter=edit_date gt '${twentyMinutesAgo}'`;
+    const targetDate = moment('2025-05-24').tz(accountTimezone);
+    console.log(`Checking payments for jobs created on or after ${targetDate.format('YYYY-MM-DD')} and edited after ${twentyMinutesAgo}`);
 
-    const paymentsResponse = await serviceM8Api.get(`/jobpayment.json?${filter}`);
+    // Step 1: Fetch jobs created on or after May 24, 2025
+    const jobFilter = `$filter=created_date ge '${targetDate.format('YYYY-MM-DD HH:mm:ss')}'`;
+    const jobsResponse = await serviceM8Api.get(`/job.json?${jobFilter}`);
+    const jobs = jobsResponse.data;
+    console.log(`Fetched ${jobs.length} jobs created on or after May 24, 2025`);
+
+    if (jobs.length === 0) {
+      console.log('No new jobs found.');
+      return;
+    }
+
+    // Step 2: Fetch payments edited in the last 20 minutes
+    const paymentFilter = `$filter=edit_date gt '${twentyMinutesAgo}'`;
+    const paymentsResponse = await serviceM8Api.get(`/jobpayment.json?${paymentFilter}`);
     const payments = paymentsResponse.data;
-    console.log(`Fetched ${payments.length} new or updated payments from ServiceM8`);
+    console.log(`Fetched ${payments.length} payments edited in the last 20 minutes`);
+
+    // Create a set of valid job UUIDs
+    const validJobUuids = new Set(jobs.map(job => job.uuid));
 
     for (const payment of payments) {
       const paymentUuid = payment.uuid;
+      const jobUuid = payment.job_uuid;
+
+      // Step 3: Skip if this payment has already been processed
       if (processedJobs.has(paymentUuid)) {
         console.log(`Payment ${paymentUuid} already processed, skipping.`);
         continue;
       }
 
-      // Log payment details for debugging
-      console.log(`Payment ${paymentUuid} details:`, {
-        active: payment.active,
-        amount: payment.amount,
-        timestamp: payment.timestamp,
-        edit_date: payment.edit_date,
-        job_uuid: payment.job_uuid,
-      });
+      // Step 4: Check if the payment belongs to a job created on or after May 24, 2025
+      if (!validJobUuids.has(jobUuid)) {
+        console.log(`Payment ${paymentUuid} belongs to an older job (${jobUuid}), skipping.`);
+        continue;
+      }
 
-      // Check if payment is paid and recent
-      const paymentTimestamp = payment.timestamp;
-      const paymentEditDate = payment.edit_date; // For debugging
+      // Step 5: Check if the payment is paid and recent
       if (
         payment.active === 1 &&
         payment.amount > 0 &&
-        paymentTimestamp &&
-        paymentTimestamp !== '0000-00-00 00:00:00' &&
-        moment(paymentTimestamp).tz(accountTimezone).isAfter(twentyMinutesAgo)
+        (
+          (payment.timestamp !== '0000-00-00 00:00:00' && moment(payment.timestamp).tz(accountTimezone).isAfter(twentyMinutesAgo)) ||
+          (payment.timestamp === '0000-00-00 00:00:00' && moment(payment.edit_date).tz(accountTimezone).isAfter(twentyMinutesAgo))
+        )
       ) {
-        const jobUuid = payment.job_uuid;
-
-        // Fetch job to get company_uuid and GHL Contact ID
-        const jobResponse = await serviceM8Api.get(`/job.json`, {
-          params: { '$filter': `uuid eq '${jobUuid}'` },
-        });
-        const job = jobResponse.data[0];
-        if (!job) {
-          console.log(`No job found for job_uuid ${jobUuid}, skipping payment ${paymentUuid}`);
-          continue;
-        }
-        const companyUuid = job.company_uuid;
-        let ghlContactId = '';
-        if (job.job_description) {
-          const ghlContactIdMatch = job.job_description.match(/GHL Contact ID: ([a-zA-Z0-9]+)/);
-          ghlContactId = ghlContactIdMatch ? ghlContactIdMatch[1] : '';
-        }
-
-        const paymentDate = paymentTimestamp || 'not available';
-        console.log(`Recent paid payment found: UUID ${paymentUuid}, Job ${jobUuid}, Amount ${payment.amount}, Date ${paymentDate}`);
-
-        // Fetch company contact
-        const companyResponse = await serviceM8Api.get('/companycontact.json', {
-          params: { '$filter': `company_uuid eq '${companyUuid}'` },
-        });
-        const company = companyResponse.data;
-        const primaryContact = company.find((c) => c.email) || {};
-        const clientEmail = (primaryContact.email || '').trim().toLowerCase();
-        console.log(`Extracted client email: ${clientEmail}`);
-
-        // Skip if contact already processed
-        if (processedContacts.has(ghlContactId || clientEmail)) {
-          console.log(`Contact ${ghlContactId || clientEmail} already triggered, skipping.`);
-          continue;
-        }
-
-        const webhookPayload = {
+        console.log(`Recent paid payment found: UUID ${paymentUuid}, Amount ${payment.amount}, Job UUID ${jobUuid}`);
+        // Trigger the GHL webhook
+        await axios.post(GHL_WEBHOOK_URL, {
+          paymentUuid: paymentUuid,
+          amount: payment.amount,
           jobUuid: jobUuid,
-          clientEmail: clientEmail || '',
-          ghlContactId: ghlContactId,
           status: 'Invoice Paid',
-        };
-        console.log(
-          `Triggering GHL webhook for payment ${paymentUuid} with payload: ${JSON.stringify(webhookPayload)}`
-        );
-
-        try {
-          const webhookResponse = await axios.post(GHL_WEBHOOK_URL, webhookPayload, {
-            headers: {
-              Authorization: `Bearer ${GHL_API_KEY}`,
-              'Content-Type': 'application/json',
-            },
-          });
-          console.log(
-            `GHL webhook response for payment ${paymentUuid}: ${webhookResponse.status} ${JSON.stringify(webhookResponse.data)}`
-          );
-          processedJobs.add(paymentUuid);
-          processedContacts.add(ghlContactId || clientEmail);
-        } catch (webhookError) {
-          console.error(
-            `Failed to trigger GHL webhook for payment ${paymentUuid}:`,
-            webhookError.response ? `${webhookError.response.status} ${JSON.stringify(webhookError.response.data)}` : webhookError.message
-          );
-        }
+        }, {
+          headers: {
+            Authorization: `Bearer ${GHL_API_KEY}`,
+            'Content-Type': 'application/json',
+          },
+        });
+        processedJobs.add(paymentUuid); // Mark this payment as processed
       } else {
         console.log(`Payment ${paymentUuid} is not paid or not recent, skipping.`);
       }
     }
-
-    // Save state to persist processedJobs and processedContacts
-    await saveState(Date.now());
   } catch (error) {
-    console.error('Error checking payment status:', error.response ? error.response.data : error.message);
+    console.error('Error checking payment status:', error.message);
   }
 };
 // Endpoint for GHL to create a job in ServiceM8
