@@ -15,7 +15,7 @@ const app = express();
 app.use(express.json());
 
 // Configure multer for file uploads
-const upload = multer({ dest: 'uploads/' });
+const upload = multer({ dest: 'Uploads/' });
 
 const SERVICE_M8_USERNAME = process.env.SERVICE_M8_USERNAME;
 const SERVICE_M8_PASSWORD = process.env.SERVICE_M8_PASSWORD;
@@ -24,7 +24,7 @@ const GHL_WEBHOOK_URL = process.env.GHL_WEBHOOK_URL;
 const PORT = process.env.PORT || 3000;
 
 // Ensure uploads directory exists
-const UPLOADS_DIR = path.join(__dirname, 'uploads');
+const UPLOADS_DIR = path.join(__dirname, 'Uploads');
 fsPromises.mkdir(UPLOADS_DIR, { recursive: true }).catch((error) => {
   console.error('Error creating uploads directory:', error.message);
 });
@@ -223,7 +223,7 @@ const checkPaymentStatus = async () => {
   try {
     const accountTimezone = 'Australia/Brisbane';
     const now = moment().tz(accountTimezone);
-    const twentyMinutesAgo = now.clone().subtract(20, 'minutes').format('YYYY-MM-DDTHH:mm:ss');
+    const twentyMinutesAgo = now.clone().subtract(20, 'minutes').format('YYYY-MM-DD HH:mm:ss');
     const targetDate = moment('2025-05-24').tz(accountTimezone).startOf('day').format('YYYY-MM-DDTHH:mm:ss');
     console.log(`Checking payments for jobs created on or after ${targetDate} and payments edited after ${twentyMinutesAgo}`);
 
@@ -310,22 +310,18 @@ const checkPaymentStatus = async () => {
         continue;
       }
 
-      // Step 8: Check if payment is paid and recent
+      // Step 8: Check if payment is paid and recent (using edit_date only)
       if (
         payment.active === 1 &&
         payment.amount > 0 &&
-        (
-          (payment.timestamp !== '0000-00-00 00:00:00' && moment(payment.timestamp).tz(accountTimezone).isAfter(twentyMinutesAgo)) ||
-          (payment.timestamp === '0000-00-00 00:00:00' && moment(payment.edit_date).tz(accountTimezone).isAfter(twentyMinutesAgo))
-        )
+        moment(payment.edit_date).tz(accountTimezone).isAfter(twentyMinutesAgo)
       ) {
-        console.log(`Recent paid payment found: UUID ${paymentUuid}, Amount ${payment.amount}, Job UUID ${jobUuid}`);
+        console.log(`Recent paid payment found: UUID ${paymentUuid}, Amount ${payment.amount}, Job UUID ${jobUuid}, Edit Date ${payment.edit_date}`);
         const webhookPayload = {
           paymentUuid: paymentUuid,
           jobUuid: jobUuid,
           clientEmail: clientEmail || '',
           ghlContactId: ghlContactId,
-          amount: payment.amount,
           status: 'Invoice Paid',
         };
         try {
@@ -347,7 +343,11 @@ const checkPaymentStatus = async () => {
           );
         }
       } else {
-        console.log(`Payment ${paymentUuid} is not paid or not recent, skipping.`);
+        console.log(`Payment ${paymentUuid} is not paid or not recent, skipping. Details:`, {
+          active: payment.active,
+          amount: payment.amount,
+          edit_date: payment.edit_date,
+        });
       }
     }
 
