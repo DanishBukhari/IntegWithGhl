@@ -716,6 +716,7 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
       }
     }
 
+
     console.log(`Job creation completed for job ${jobUuid}`);
     res.status(200).json({ message: 'Job created successfully', jobUuid });
   } catch (error) {
