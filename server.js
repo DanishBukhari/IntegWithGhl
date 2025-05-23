@@ -113,7 +113,7 @@ const checkNewContacts = async () => {
     const lastPollTimestamp = await loadState();
     const currentTimestamp = Date.now();
 
-    const accountTimezone = 'Australia/Brisbane';
+    const accountTimezone = 'Australia/Perth';
     const now = moment().tz(accountTimezone);
     const twentyMinutesAgo = now.clone().subtract(20, 'minutes').format('YYYY-MM-DD HH:mm:ss');
     const filter = `$filter=edit_date gt '${twentyMinutesAgo}'`;
@@ -224,6 +224,7 @@ const checkPaymentStatus = async () => {
     const accountTimezone = 'Australia/Brisbane';
     const now = moment().tz(accountTimezone);
     const twentyMinutesAgo = now.clone().subtract(20, 'minutes').format('YYYY-MM-DD HH:mm:ss');
+    console.log(`Checking payments after ${twentyMinutesAgo} (Brisbane time)`);
     const filter = `$filter=edit_date gt '${twentyMinutesAgo}'`;
 
     const paymentsResponse = await serviceM8Api.get(`/jobpayment.json?${filter}`);
@@ -237,17 +238,43 @@ const checkPaymentStatus = async () => {
         continue;
       }
 
+      // Log payment details for debugging
+      console.log(`Payment ${paymentUuid} details:`, {
+        active: payment.active,
+        amount: payment.amount,
+        timestamp: payment.timestamp,
+        edit_date: payment.edit_date,
+        job_uuid: payment.job_uuid,
+      });
+
       // Check if payment is paid and recent
       const paymentTimestamp = payment.timestamp;
+      const paymentEditDate = payment.edit_date; // For debugging
       if (
         payment.active === 1 &&
         payment.amount > 0 &&
         paymentTimestamp &&
         paymentTimestamp !== '0000-00-00 00:00:00' &&
-        moment(paymentTimestamp).isAfter(twentyMinutesAgo)
+        moment(paymentTimestamp).tz(accountTimezone).isAfter(twentyMinutesAgo)
       ) {
         const jobUuid = payment.job_uuid;
-        const companyUuid = payment.company_uuid; // Adjust if company_uuid isn’t directly available
+
+        // Fetch job to get company_uuid and GHL Contact ID
+        const jobResponse = await serviceM8Api.get(`/job.json`, {
+          params: { '$filter': `uuid eq '${jobUuid}'` },
+        });
+        const job = jobResponse.data[0];
+        if (!job) {
+          console.log(`No job found for job_uuid ${jobUuid}, skipping payment ${paymentUuid}`);
+          continue;
+        }
+        const companyUuid = job.company_uuid;
+        let ghlContactId = '';
+        if (job.job_description) {
+          const ghlContactIdMatch = job.job_description.match(/GHL Contact ID: ([a-zA-Z0-9]+)/);
+          ghlContactId = ghlContactIdMatch ? ghlContactIdMatch[1] : '';
+        }
+
         const paymentDate = paymentTimestamp || 'not available';
         console.log(`Recent paid payment found: UUID ${paymentUuid}, Job ${jobUuid}, Amount ${payment.amount}, Date ${paymentDate}`);
 
@@ -259,17 +286,6 @@ const checkPaymentStatus = async () => {
         const primaryContact = company.find((c) => c.email) || {};
         const clientEmail = (primaryContact.email || '').trim().toLowerCase();
         console.log(`Extracted client email: ${clientEmail}`);
-
-        // Fetch job for GHL Contact ID
-        let ghlContactId = '';
-        const jobResponse = await serviceM8Api.get(`/job.json`, {
-          params: { '$filter': `uuid eq '${jobUuid}'` },
-        });
-        const job = jobResponse.data[0];
-        if (job && job.job_description) {
-          const ghlContactIdMatch = job.job_description.match(/GHL Contact ID: ([a-zA-Z0-9]+)/);
-          ghlContactId = ghlContactIdMatch ? ghlContactIdMatch[1] : '';
-        }
 
         // Skip if contact already processed
         if (processedContacts.has(ghlContactId || clientEmail)) {
@@ -309,6 +325,9 @@ const checkPaymentStatus = async () => {
         console.log(`Payment ${paymentUuid} is not paid or not recent, skipping.`);
       }
     }
+
+    // Save state to persist processedJobs and processedContacts
+    await saveState(Date.now());
   } catch (error) {
     console.error('Error checking payment status:', error.response ? error.response.data : error.message);
   }
