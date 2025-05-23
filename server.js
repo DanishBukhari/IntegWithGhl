@@ -62,27 +62,35 @@ async function loadState() {
     const state = JSON.parse(data);
     processedJobs = new Set(state.processedJobs || []);
     processedContacts = new Set(state.processedContacts || []);
+    console.log('Loaded state: processedJobs=', processedJobs.size, 'processedContacts=', processedContacts.size);
     return state.lastPollTimestamp || 0;
   } catch (error) {
+    console.error('Error loading state:', error.message);
     return 0;
   }
 }
 
 // Save polling state
 async function saveState(lastPollTimestamp) {
-  await fsPromises.writeFile(
-    STATE_FILE,
-    JSON.stringify({
-      lastPollTimestamp,
-      processedJobs: Array.from(processedJobs),
-      processedContacts: Array.from(processedContacts),
-    })
-  );
+  try {
+    await fsPromises.writeFile(
+      STATE_FILE,
+      JSON.stringify({
+        lastPollTimestamp,
+        processedJobs: Array.from(processedJobs),
+        processedContacts: Array.from(processedContacts),
+      })
+    );
+    console.log('Saved state: lastPollTimestamp=', lastPollTimestamp);
+  } catch (error) {
+    console.error('Error saving state:', error.message);
+  }
 }
 
 // Fetch ServiceM8 "Quotes - New" queue UUID
 async function getQuotesNewQueueUuid() {
   if (quotesNewQueueUuid) {
+    console.log('Using cached Quotes - New queue UUID:', quotesNewQueueUuid);
     return quotesNewQueueUuid;
   }
 
@@ -109,7 +117,7 @@ async function getQuotesNewQueueUuid() {
 // Check new ServiceM8 contacts and sync to GHL
 const checkNewContacts = async () => {
   try {
-    console.log('Polling ServiceM8 for new contacts...');
+    console.log('Starting contact polling...');
     const lastPollTimestamp = await loadState();
     const currentTimestamp = Date.now();
 
@@ -125,13 +133,14 @@ const checkNewContacts = async () => {
     for (const contact of contacts) {
       const contactUuid = contact.uuid;
       if (processedContacts.has(contactUuid)) {
+        console.log(`Contact ${contactUuid} already processed, skipping.`);
         continue;
       }
 
       const { first, last, email, phone, mobile, company_uuid } = contact;
       const contactName = `${first || ''} ${last || ''}`.trim();
       console.log(
-        `New contact found - UUID: ${contactUuid}, Name: ${contactName}, Email: ${email}, Phone: ${
+        `Processing new contact - UUID: ${contactUuid}, Name: ${contactName}, Email: ${email}, Phone: ${
           phone || mobile
         }, Company UUID: ${company_uuid}`
       );
@@ -213,6 +222,7 @@ const checkNewContacts = async () => {
     }
 
     await saveState(currentTimestamp);
+    console.log('Contact polling completed.');
   } catch (error) {
     console.error('Error polling contacts:', error.response ? error.response.data : error.message);
   }
@@ -221,6 +231,7 @@ const checkNewContacts = async () => {
 // Check payment status and trigger GHL webhook
 const checkPaymentStatus = async () => {
   try {
+    console.log('Starting payment status check...');
     const accountTimezone = 'Australia/Brisbane';
     const now = moment().tz(accountTimezone);
     const twentyMinutesAgo = now.clone().subtract(20, 'minutes').format('YYYY-MM-DD HH:mm:ss');
@@ -236,6 +247,7 @@ const checkPaymentStatus = async () => {
     for (const payment of payments) {
       const paymentUuid = payment.uuid;
       const jobUuid = payment.job_uuid;
+      console.log(`Processing payment ${paymentUuid} for job ${jobUuid}`);
 
       // Step 2: Skip if payment already processed
       if (processedJobs.has(paymentUuid)) {
@@ -243,32 +255,12 @@ const checkPaymentStatus = async () => {
         continue;
       }
 
-      // Step 3: Fetch job activities to determine completion date
-      let maxEndDate = null;
-      try {
-        const jobActivitiesResponse = await serviceM8Api.get(`/jobactivity.json?$filter=job_uuid eq '${jobUuid}'`);
-        const jobActivities = jobActivitiesResponse.data;
-        for (const activity of jobActivities) {
-          if (activity.end_date && (!maxEndDate || moment(activity.end_date).tz(accountTimezone).isAfter(moment(maxEndDate).tz(accountTimezone)))) {
-            maxEndDate = activity.end_date;
-          }
-        }
-      } catch (error) {
-        console.error(`Error fetching job activities for job ${jobUuid}:`, error.response ? error.response.data : error.message);
-        continue;
-      }
-
-      // Step 4: Check if job was completed on or after May 24, 2025
-      if (!maxEndDate || !moment(maxEndDate).tz(accountTimezone).isSameOrAfter(targetDate)) {
-        console.log(`Payment ${paymentUuid} belongs to job ${jobUuid} not completed on or after May 24, 2025, skipping.`);
-        continue;
-      }
-
-      // Step 5: Fetch job for GHL Contact ID and company_uuid
+      // Step 3: Fetch job details to check status
       let job;
       try {
         const jobResponse = await serviceM8Api.get(`/job.json?$filter=uuid eq '${jobUuid}'`);
         job = jobResponse.data[0];
+        console.log(`Fetched job ${jobUuid}: status=${job?.status}, company_uuid=${job?.company_uuid}`);
       } catch (error) {
         console.error(`Error fetching job ${jobUuid}:`, error.response ? error.response.data : error.message);
         continue;
@@ -277,10 +269,51 @@ const checkPaymentStatus = async () => {
         console.log(`No job found for job_uuid ${jobUuid}, skipping payment ${paymentUuid}`);
         continue;
       }
+
+      // Step 4: Check if job is completed
+      if (job.status.toLowerCase() !== 'completed') {
+        console.log(`Job ${jobUuid} is not completed (status: ${job.status}), skipping payment ${paymentUuid}`);
+        continue;
+      }
+
+      // Step 5: Fetch job activities to determine completion date
+      let maxEndDate = null;
+      try {
+        const jobActivitiesResponse = await serviceM8Api.get(`/jobactivity.json?$filter=job_uuid eq '${jobUuid}'`);
+        const jobActivities = jobActivitiesResponse.data;
+        console.log(`Fetched ${jobActivities.length} activities for job ${jobUuid}`);
+        for (const activity of jobActivities) {
+          if (activity.end_date) {
+            console.log(`Activity for job ${jobUuid}: end_date=${activity.end_date}`);
+            if (!maxEndDate || moment(activity.end_date).tz(accountTimezone).isAfter(moment(maxEndDate).tz(accountTimezone))) {
+              maxEndDate = activity.end_date;
+            }
+          }
+        }
+      } catch (error) {
+        console.error(`Error fetching job activities for job ${jobUuid}:`, error.response ? error.response.data : error.message);
+        continue;
+      }
+
+      // Step 6: Check if job was completed on or after May 24, 2025
+      if (!maxEndDate) {
+        console.log(`No end_date found for job ${jobUuid} activities, skipping payment ${paymentUuid}`);
+        continue;
+      }
+      const completionDate = moment(maxEndDate).tz(accountTimezone);
+      const targetMoment = moment(targetDate).tz(accountTimezone);
+      console.log(`Job ${jobUuid} completion date: ${completionDate.format('YYYY-MM-DD HH:mm:ss')}, target: ${targetMoment.format('YYYY-MM-DD HH:mm:ss')}`);
+      if (!completionDate.isSameOrAfter(targetMoment)) {
+        console.log(`Payment ${paymentUuid} belongs to job ${jobUuid} not completed on or after May 24, 2025, skipping.`);
+        continue;
+      }
+
+      // Step 7: Fetch GHL Contact ID and company_uuid
       let ghlContactId = '';
       if (job.job_description) {
         const ghlContactIdMatch = job.job_description.match(/GHL Contact ID: ([a-zA-Z0-9]+)/);
         ghlContactId = ghlContactIdMatch ? ghlContactIdMatch[1] : '';
+        console.log(`Extracted GHL Contact ID: ${ghlContactId} for job ${jobUuid}`);
       }
       const companyUuid = job.company_uuid;
       if (!companyUuid) {
@@ -288,7 +321,7 @@ const checkPaymentStatus = async () => {
         continue;
       }
 
-      // Step 6: Fetch company contact
+      // Step 8: Fetch company contact
       let clientEmail = '';
       try {
         const companyResponse = await serviceM8Api.get('/companycontact.json', {
@@ -297,19 +330,19 @@ const checkPaymentStatus = async () => {
         const company = companyResponse.data;
         const primaryContact = company.find(c => c.email) || {};
         clientEmail = (primaryContact.email || '').trim().toLowerCase();
-        console.log(`Extracted client email: ${clientEmail}`);
+        console.log(`Extracted client email: ${clientEmail} for company ${companyUuid}`);
       } catch (error) {
         console.error(`Error fetching contact for company ${companyUuid}:`, error.response ? error.response.data : error.message);
       }
 
-      // Step 7: Check if contact already triggered
+      // Step 9: Check if contact already triggered
       const contactKey = ghlContactId || clientEmail;
       if (contactKey && processedContacts.has(contactKey)) {
         console.log(`Contact ${contactKey} already triggered, skipping payment ${paymentUuid}`);
         continue;
       }
 
-      // Step 8: Check if payment is paid and recent
+      // Step 10: Check if payment is paid and recent
       if (
         payment.active === 1 &&
         payment.amount > 0 &&
@@ -331,7 +364,7 @@ const checkPaymentStatus = async () => {
             },
           });
           console.log(
-            `GHL webhook response for payment ${paymentUuid}: ${webhookResponse.status} ${JSON.stringify(webhookResponse.data)}`
+            `GHL webhook triggered for payment ${paymentUuid}: status=${webhookResponse.status}, response=${JSON.stringify(webhookResponse.data)}`
           );
           processedJobs.add(paymentUuid);
           if (contactKey) processedContacts.add(contactKey);
@@ -350,8 +383,9 @@ const checkPaymentStatus = async () => {
       }
     }
 
-    // Step 9: Save state
+    // Step 11: Save state
     await saveState(Date.now());
+    console.log('Payment status check completed.');
   } catch (error) {
     console.error('Error checking payment status:', error.response ? error.response.data : error.message);
   }
@@ -360,9 +394,11 @@ const checkPaymentStatus = async () => {
 // Endpoint for GHL to create a job in ServiceM8
 app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
   try {
+    console.log('Starting job creation from GHL...');
     const { firstName, lastName, email, phone, address, jobDescription, ghlContactId } = req.body;
 
     if (!firstName || !lastName || !email || !ghlContactId) {
+      console.log('Missing required fields:', { firstName, lastName, email, ghlContactId });
       return res.status(400).json({ error: 'Missing required fields' });
     }
 
@@ -374,9 +410,11 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
       return res.status(200).json({ message: 'Job creation skipped (duplicate request)' });
     }
     processedGhlContactIds.set(ghlContactId, now);
+    console.log(`Processing job creation for ghlContactId ${ghlContactId}`);
 
     const queueUuid = await getQuotesNewQueueUuid();
     if (!queueUuid) {
+      console.log('Failed to fetch "Quotes - New" queue UUID');
       return res.status(500).json({ error: 'Failed to fetch "Quotes - New" queue UUID' });
     }
 
@@ -392,7 +430,7 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
       const inputEmail = (email || '').toLowerCase().trim();
       const inputName = fullName;
       console.log(
-        `Comparing email: ${companyEmail} vs ${inputEmail}, name: ${companyName} vs ${inputName}`
+        `Comparing company: email=${companyEmail} vs ${inputEmail}, name=${companyName} vs ${inputName}`
       );
       return companyEmail === inputEmail || companyName === inputName;
     });
@@ -436,7 +474,7 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
     try {
       const contactResponse = await ghlApi.get(`/contacts/${ghlContactId}`);
       const contact = contactResponse.data.contact;
-      console.log(`GHL contact data: ${JSON.stringify(contact, null, 2)}`);
+      console.log(`Fetched GHL contact data for ${ghlContactId}`);
 
       if (contact.customField) {
         for (const field of contact.customField) {
@@ -487,7 +525,7 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
         }
       }
 
-      console.log(`Fetched ${photoData.length} photos from GHL contact ${ghlContactId}:`, photoData.map(p => p.url));
+      console.log(`Fetched ${photoData.length} photos for contact ${ghlContactId}:`, photoData.map(p => p.url));
     } catch (error) {
       console.error(
         'Error fetching GHL contact images:',
@@ -495,13 +533,15 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
       );
     }
 
-    // Download and upload images to ServiceM8 as notes
+    // Download and upload images to ServiceM8
     for (const photo of photoData) {
       const { url: photoUrl, documentId, filename, mimetype } = photo;
       let tempPath;
+      let attachmentUuid;
 
       try {
         tempPath = path.join(UPLOADS_DIR, filename);
+        console.log(`Downloading image from ${photoUrl} to ${tempPath}`);
         let downloadResponse;
 
         try {
@@ -554,20 +594,56 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
           continue;
         }
 
+        // Step 1: Upload image as job attachment
+        const uploadAttachment = async (attempt = 1) => {
+          try {
+            const attachmentForm = new FormData();
+            attachmentForm.append('related_object', 'job');
+            attachmentForm.append('related_object_uuid', jobUuid);
+            attachmentForm.append('attachment_name', filename);
+            attachmentForm.append('file_type', mimetype);
+            attachmentForm.append('attachment', fs.createReadStream(tempPath), { filename, contentType: mimetype });
+
+            const attachmentResponse = await serviceM8Api.post('/Attachment.json', attachmentForm, {
+              headers: {
+                ...attachmentForm.getHeaders(),
+                'Content-Type': `multipart/form-data; boundary=${attachmentForm.getBoundary()}`,
+              },
+            });
+
+            attachmentUuid = attachmentResponse.headers['x-record-uuid'];
+            console.log(
+              `Attachment added to job ${jobUuid} from URL ${photoUrl}, attachment UUID: ${attachmentUuid}`
+            );
+          } catch (error) {
+            console.error(
+              `Attempt ${attempt} failed to upload attachment for ${photoUrl}:`,
+              error.response ? error.response.data : error.message
+            );
+            if (attempt < 2) {
+              console.log(`Retrying attachment upload for ${photoUrl}...`);
+              await uploadAttachment(attempt + 1);
+            } else {
+              throw error;
+            }
+          }
+        };
+        await uploadAttachment();
+
+        // Step 2: Create note referencing the attachment
         const uploadNote = async (attempt = 1) => {
           try {
             const noteForm = new FormData();
             noteForm.append('related_object', 'job');
             noteForm.append('related_object_uuid', jobUuid);
-            noteForm.append('body', `Image from GHL: ${filename}`);
-            noteForm.append('attachment', fs.createReadStream(tempPath), { filename, contentType: mimetype });
+            noteForm.append('body', `Image from GHL: ${filename} (Attachment UUID: ${attachmentUuid})`);
 
             const noteResponse = await serviceM8Api.post('/note.json', noteForm, {
               headers: noteForm.getHeaders(),
             });
 
             console.log(
-              `Note with image added to job ${jobUuid} from URL ${photoUrl}, note UUID: ${
+              `Note added to job ${jobUuid} for attachment ${attachmentUuid}, note UUID: ${
                 noteResponse.headers['x-record-uuid']
               }`
             );
@@ -586,6 +662,7 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
         };
         await uploadNote();
 
+        // Step 3: Upload image as company attachment
         const uploadCompanyAttachment = async (attempt = 1) => {
           try {
             const companyForm = new FormData();
@@ -603,7 +680,7 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
             });
 
             console.log(
-              `Image added to company ${companyUuid} from URL ${photoUrl}, attachment UUID: ${
+              `Attachment added to company ${companyUuid} from URL ${photoUrl}, attachment UUID: ${
                 companyAttachmentResponse.headers['x-record-uuid']
               }`
             );
@@ -639,6 +716,7 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
       }
     }
 
+    console.log(`Job creation completed for job ${jobUuid}`);
     res.status(200).json({ message: 'Job created successfully', jobUuid });
   } catch (error) {
     console.error('Error creating job:', error.response ? error.response.data : error.message);
@@ -648,23 +726,25 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
 
 // Temporary endpoints for testing
 app.get('/test-payment-check', async (req, res) => {
+  console.log('Triggering test payment check...');
   await checkPaymentStatus();
   res.send('Payment check triggered');
 });
 
 app.get('/test-contact-check', async (req, res) => {
+  console.log('Triggering test contact check...');
   await checkNewContacts();
   res.send('Contact check triggered');
 });
 
 // Schedule polling
 cron.schedule('*/20 * * * *', () => {
-  console.log('Polling ServiceM8 for new contacts...');
+  console.log('Scheduled polling for new contacts...');
   checkNewContacts();
 });
 
 cron.schedule('*/20 * * * *', () => {
-  console.log('Polling ServiceM8 for completed jobs and paid payments...');
+  console.log('Scheduled polling for payment status...');
   checkPaymentStatus();
 });
 
