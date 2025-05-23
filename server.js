@@ -2,8 +2,8 @@ const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
 const dotenv = require('dotenv');
-const fs = require('fs'); // Standard fs for createReadStream
-const fsPromises = require('fs').promises; // Promise-based fs for writeFile, unlink
+const fs = require('fs');
+const fsPromises = require('fs').promises;
 const moment = require('moment-timezone');
 const multer = require('multer');
 const FormData = require('form-data');
@@ -14,7 +14,7 @@ dotenv.config();
 const app = express();
 app.use(express.json());
 
-// Configure multer for file uploads (for GHL form file attachments)
+// Configure multer for file uploads
 const upload = multer({ dest: 'uploads/' });
 
 const SERVICE_M8_USERNAME = process.env.SERVICE_M8_USERNAME;
@@ -29,7 +29,7 @@ fsPromises.mkdir(UPLOADS_DIR, { recursive: true }).catch((error) => {
   console.error('Error creating uploads directory:', error.message);
 });
 
-// Axios instance with Basic Auth for ServiceM8
+// Axios instance for ServiceM8
 const serviceM8Api = axios.create({
   baseURL: 'https://api.servicem8.com/api_1.0',
   headers: { Accept: 'application/json' },
@@ -39,7 +39,7 @@ const serviceM8Api = axios.create({
   },
 });
 
-// Axios instance for GHL with API key
+// Axios instance for GHL
 const ghlApi = axios.create({
   baseURL: 'https://rest.gohighlevel.com/v1',
   headers: {
@@ -53,7 +53,7 @@ let processedJobs = new Set();
 let processedContacts = new Set();
 let quotesNewQueueUuid = null;
 const STATE_FILE = 'state.json';
-const processedGhlContactIds = new Map(); // For deduplication
+const processedGhlContactIds = new Map();
 
 // Load polling state
 async function loadState() {
@@ -113,7 +113,7 @@ const checkNewContacts = async () => {
     const lastPollTimestamp = await loadState();
     const currentTimestamp = Date.now();
 
-    const accountTimezone = 'Australia/Perth';
+    const accountTimezone = 'Australia/Brisbane';
     const now = moment().tz(accountTimezone);
     const twentyMinutesAgo = now.clone().subtract(20, 'minutes').format('YYYY-MM-DD HH:mm:ss');
     const filter = `$filter=edit_date gt '${twentyMinutesAgo}'`;
@@ -221,15 +221,28 @@ const checkNewContacts = async () => {
 // Check payment status and trigger GHL webhook
 const checkPaymentStatus = async () => {
   try {
-    const accountTimezone = 'Australia/Brisbane'; // Adjust as needed
+    const accountTimezone = 'Australia/Brisbane';
     const now = moment().tz(accountTimezone);
-    const twentyMinutesAgo = now.clone().subtract(20, 'minutes').format('YYYY-MM-DD HH:mm:ss');
-    const targetDate = moment('2025-05-24').tz(accountTimezone);
-    console.log(`Checking payments for jobs created on or after ${targetDate.format('YYYY-MM-DD')} and edited after ${twentyMinutesAgo}`);
+    const twentyMinutesAgo = now.clone().subtract(20, 'minutes').format('YYYY-MM-DDTHH:mm:ss');
+    const targetDate = moment('2025-05-24').tz(accountTimezone).startOf('day').format('YYYY-MM-DDTHH:mm:ss');
+    console.log(`Checking payments for jobs created on or after ${targetDate} and payments edited after ${twentyMinutesAgo}`);
 
     // Step 1: Fetch jobs created on or after May 24, 2025
-    const jobFilter = `$filter=created_date ge '${targetDate.format('YYYY-MM-DD HH:mm:ss')}'`;
-    const jobsResponse = await serviceM8Api.get(`/job.json?${jobFilter}`);
+    const jobFilter = `$filter=date ge '${targetDate}'`;
+    let jobsResponse;
+    try {
+      jobsResponse = await serviceM8Api.get(`/job.json?${jobFilter}`);
+    } catch (error) {
+      if (error.response && error.response.status === 400) {
+        console.log('Job filter failed, fetching all jobs and filtering locally...');
+        jobsResponse = await serviceM8Api.get('/job.json');
+        jobsResponse.data = jobsResponse.data.filter(job =>
+          moment(job.date).tz(accountTimezone).isSameOrAfter(targetDate)
+        );
+      } else {
+        throw error;
+      }
+    }
     const jobs = jobsResponse.data;
     console.log(`Fetched ${jobs.length} jobs created on or after May 24, 2025`);
 
@@ -251,19 +264,53 @@ const checkPaymentStatus = async () => {
       const paymentUuid = payment.uuid;
       const jobUuid = payment.job_uuid;
 
-      // Step 3: Skip if this payment has already been processed
+      // Step 3: Skip if payment already processed
       if (processedJobs.has(paymentUuid)) {
         console.log(`Payment ${paymentUuid} already processed, skipping.`);
         continue;
       }
 
-      // Step 4: Check if the payment belongs to a job created on or after May 24, 2025
+      // Step 4: Check if payment belongs to a new job
       if (!validJobUuids.has(jobUuid)) {
         console.log(`Payment ${paymentUuid} belongs to an older job (${jobUuid}), skipping.`);
         continue;
       }
 
-      // Step 5: Check if the payment is paid and recent
+      // Step 5: Fetch job for GHL Contact ID and company_uuid
+      const job = jobs.find(j => j.uuid === jobUuid);
+      let ghlContactId = '';
+      if (job && job.job_description) {
+        const ghlContactIdMatch = job.job_description.match(/GHL Contact ID: ([a-zA-Z0-9]+)/);
+        ghlContactId = ghlContactIdMatch ? ghlContactIdMatch[1] : '';
+      }
+      const companyUuid = job ? job.company_uuid : null;
+      if (!companyUuid) {
+        console.log(`No company_uuid for job ${jobUuid}, skipping payment ${paymentUuid}`);
+        continue;
+      }
+
+      // Step 6: Fetch company contact
+      let clientEmail = '';
+      try {
+        const companyResponse = await serviceM8Api.get('/companycontact.json', {
+          params: { '$filter': `company_uuid eq '${companyUuid}'` },
+        });
+        const company = companyResponse.data;
+        const primaryContact = company.find(c => c.email) || {};
+        clientEmail = (primaryContact.email || '').trim().toLowerCase();
+        console.log(`Extracted client email: ${clientEmail}`);
+      } catch (error) {
+        console.error(`Error fetching contact for company ${companyUuid}:`, error.response ? error.response.data : error.message);
+      }
+
+      // Step 7: Check if contact already triggered
+      const contactKey = ghlContactId || clientEmail;
+      if (contactKey && processedContacts.has(contactKey)) {
+        console.log(`Contact ${contactKey} already triggered, skipping payment ${paymentUuid}`);
+        continue;
+      }
+
+      // Step 8: Check if payment is paid and recent
       if (
         payment.active === 1 &&
         payment.amount > 0 &&
@@ -273,27 +320,44 @@ const checkPaymentStatus = async () => {
         )
       ) {
         console.log(`Recent paid payment found: UUID ${paymentUuid}, Amount ${payment.amount}, Job UUID ${jobUuid}`);
-        // Trigger the GHL webhook
-        await axios.post(GHL_WEBHOOK_URL, {
+        const webhookPayload = {
           paymentUuid: paymentUuid,
-          amount: payment.amount,
           jobUuid: jobUuid,
+          clientEmail: clientEmail || '',
+          ghlContactId: ghlContactId,
+          amount: payment.amount,
           status: 'Invoice Paid',
-        }, {
-          headers: {
-            Authorization: `Bearer ${GHL_API_KEY}`,
-            'Content-Type': 'application/json',
-          },
-        });
-        processedJobs.add(paymentUuid); // Mark this payment as processed
+        };
+        try {
+          const webhookResponse = await axios.post(GHL_WEBHOOK_URL, webhookPayload, {
+            headers: {
+              Authorization: `Bearer ${GHL_API_KEY}`,
+              'Content-Type': 'application/json',
+            },
+          });
+          console.log(
+            `GHL webhook response for payment ${paymentUuid}: ${webhookResponse.status} ${JSON.stringify(webhookResponse.data)}`
+          );
+          processedJobs.add(paymentUuid);
+          if (contactKey) processedContacts.add(contactKey);
+        } catch (webhookError) {
+          console.error(
+            `Failed to trigger GHL webhook for payment ${paymentUuid}:`,
+            webhookError.response ? webhookError.response.data : webhookError.message
+          );
+        }
       } else {
         console.log(`Payment ${paymentUuid} is not paid or not recent, skipping.`);
       }
     }
+
+    // Step 9: Save state
+    await saveState(Date.now());
   } catch (error) {
-    console.error('Error checking payment status:', error.message);
+    console.error('Error checking payment status:', error.response ? error.response.data : error.message);
   }
 };
+
 // Endpoint for GHL to create a job in ServiceM8
 app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
   try {
@@ -371,7 +435,6 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
     // Fetch images from GHL /contacts/{id} with fallbacks
     let photoData = [];
     try {
-      // Primary method: Fetch contact data
       const contactResponse = await ghlApi.get(`/contacts/${ghlContactId}`);
       const contact = contactResponse.data.contact;
       console.log(`GHL contact data: ${JSON.stringify(contact, null, 2)}`);
@@ -379,7 +442,6 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
       if (contact.customField) {
         for (const field of contact.customField) {
           if (field.value && typeof field.value === 'object' && !Array.isArray(field.value)) {
-            // Handle nested object with image entries
             for (const [uuid, entry] of Object.entries(field.value)) {
               if (
                 entry.url &&
@@ -401,7 +463,6 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
         console.log(`No customField found in GHL contact ${ghlContactId}. Available properties: ${Object.keys(contact)}`);
       }
 
-      // Fallback 1: Try fetching attachments endpoint (if available)
       if (photoData.length === 0) {
         try {
           const attachmentsResponse = await ghlApi.get(`/contacts/${ghlContactId}/attachments`);
@@ -441,11 +502,9 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
       let tempPath;
 
       try {
-        // Attempt to download with authentication
         tempPath = path.join(UPLOADS_DIR, filename);
         let downloadResponse;
 
-        // Primary download method: Use document download endpoint with documentId
         try {
           downloadResponse = await axios.get(`https://services.leadconnectorhq.com/documents/download/${documentId}`, {
             headers: {
@@ -455,8 +514,6 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
           });
         } catch (primaryError) {
           console.log(`Primary download failed for ${photoUrl}:`, primaryError.response ? primaryError.response.data : primaryError.message);
-
-          // Fallback 1: Try direct URL with auth
           try {
             downloadResponse = await axios.get(photoUrl, {
               headers: {
@@ -470,14 +527,12 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
           }
         }
 
-        // Validate content type
         const contentType = downloadResponse.headers['content-type'] || '';
         if (!contentType.match(/image\/(png|jpeg|jpg)/i)) {
           console.log(`Skipping non-image URL ${photoUrl}: Content-Type ${contentType}`);
           continue;
         }
 
-        // Save the image with promise-based stream handling
         const writer = fs.createWriteStream(tempPath);
         downloadResponse.data.pipe(writer);
 
@@ -486,7 +541,6 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
           writer.on('error', reject);
         });
 
-        // Verify file size
         const stats = await fsPromises.stat(tempPath);
         console.log(`Downloaded image to ${tempPath}, size: ${stats.size} bytes`);
         if (stats.size === 0) {
@@ -494,7 +548,6 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
           continue;
         }
 
-        // Verify file exists before upload
         try {
           await fsPromises.access(tempPath, fs.constants.R_OK);
         } catch (error) {
@@ -502,7 +555,6 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
           continue;
         }
 
-        // Upload to job as attachment (Attachments tab)
         const uploadJobAttachment = async (attempt = 1) => {
           try {
             const jobForm = new FormData();
@@ -539,7 +591,6 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
         };
         await uploadJobAttachment();
 
-        // Upload to company as attachment
         const uploadCompanyAttachment = async (attempt = 1) => {
           try {
             const companyForm = new FormData();
