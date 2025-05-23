@@ -225,65 +225,64 @@ const checkPaymentStatus = async () => {
     const now = moment().tz(accountTimezone);
     const twentyMinutesAgo = now.clone().subtract(20, 'minutes').format('YYYY-MM-DD HH:mm:ss');
     const targetDate = moment('2025-05-24').tz(accountTimezone).startOf('day').format('YYYY-MM-DDTHH:mm:ss');
-    console.log(`Checking payments for jobs created on or after ${targetDate} and payments edited after ${twentyMinutesAgo}`);
+    console.log(`Checking payments edited after ${twentyMinutesAgo} for jobs completed on or after ${targetDate}`);
 
-    // Step 1: Fetch jobs created on or after May 24, 2025
-    const jobFilter = `$filter=date ge '${targetDate}'`;
-    let jobsResponse;
-    try {
-      jobsResponse = await serviceM8Api.get(`/job.json?${jobFilter}`);
-    } catch (error) {
-      if (error.response && error.response.status === 400) {
-        console.log('Job filter failed, fetching all jobs and filtering locally...');
-        jobsResponse = await serviceM8Api.get('/job.json');
-        jobsResponse.data = jobsResponse.data.filter(job =>
-          moment(job.date).tz(accountTimezone).isSameOrAfter(targetDate)
-        );
-      } else {
-        throw error;
-      }
-    }
-    const jobs = jobsResponse.data;
-    console.log(`Fetched ${jobs.length} jobs created on or after May 24, 2025`);
-
-    if (jobs.length === 0) {
-      console.log('No new jobs found.');
-      return;
-    }
-
-    // Step 2: Fetch payments edited in the last 20 minutes
+    // Step 1: Fetch payments edited in the last 20 minutes
     const paymentFilter = `$filter=edit_date gt '${twentyMinutesAgo}'`;
     const paymentsResponse = await serviceM8Api.get(`/jobpayment.json?${paymentFilter}`);
     const payments = paymentsResponse.data;
     console.log(`Fetched ${payments.length} payments edited in the last 20 minutes`);
 
-    // Create a set of valid job UUIDs
-    const validJobUuids = new Set(jobs.map(job => job.uuid));
-
     for (const payment of payments) {
       const paymentUuid = payment.uuid;
       const jobUuid = payment.job_uuid;
 
-      // Step 3: Skip if payment already processed
+      // Step 2: Skip if payment already processed
       if (processedJobs.has(paymentUuid)) {
         console.log(`Payment ${paymentUuid} already processed, skipping.`);
         continue;
       }
 
-      // Step 4: Check if payment belongs to a new job
-      if (!validJobUuids.has(jobUuid)) {
-        console.log(`Payment ${paymentUuid} belongs to an older job (${jobUuid}), skipping.`);
+      // Step 3: Fetch job activities to determine completion date
+      let maxEndDate = null;
+      try {
+        const jobActivitiesResponse = await serviceM8Api.get(`/jobactivity.json?$filter=job_uuid eq '${jobUuid}'`);
+        const jobActivities = jobActivitiesResponse.data;
+        for (const activity of jobActivities) {
+          if (activity.end_date && (!maxEndDate || moment(activity.end_date).tz(accountTimezone).isAfter(moment(maxEndDate).tz(accountTimezone)))) {
+            maxEndDate = activity.end_date;
+          }
+        }
+      } catch (error) {
+        console.error(`Error fetching job activities for job ${jobUuid}:`, error.response ? error.response.data : error.message);
+        continue;
+      }
+
+      // Step 4: Check if job was completed on or after May 24, 2025
+      if (!maxEndDate || !moment(maxEndDate).tz(accountTimezone).isSameOrAfter(targetDate)) {
+        console.log(`Payment ${paymentUuid} belongs to job ${jobUuid} not completed on or after May 24, 2025, skipping.`);
         continue;
       }
 
       // Step 5: Fetch job for GHL Contact ID and company_uuid
-      const job = jobs.find(j => j.uuid === jobUuid);
+      let job;
+      try {
+        const jobResponse = await serviceM8Api.get(`/job.json?$filter=uuid eq '${jobUuid}'`);
+        job = jobResponse.data[0];
+      } catch (error) {
+        console.error(`Error fetching job ${jobUuid}:`, error.response ? error.response.data : error.message);
+        continue;
+      }
+      if (!job) {
+        console.log(`No job found for job_uuid ${jobUuid}, skipping payment ${paymentUuid}`);
+        continue;
+      }
       let ghlContactId = '';
-      if (job && job.job_description) {
+      if (job.job_description) {
         const ghlContactIdMatch = job.job_description.match(/GHL Contact ID: ([a-zA-Z0-9]+)/);
         ghlContactId = ghlContactIdMatch ? ghlContactIdMatch[1] : '';
       }
-      const companyUuid = job ? job.company_uuid : null;
+      const companyUuid = job.company_uuid;
       if (!companyUuid) {
         console.log(`No company_uuid for job ${jobUuid}, skipping payment ${paymentUuid}`);
         continue;
@@ -310,7 +309,7 @@ const checkPaymentStatus = async () => {
         continue;
       }
 
-      // Step 8: Check if payment is paid and recent (using edit_date only)
+      // Step 8: Check if payment is paid and recent
       if (
         payment.active === 1 &&
         payment.amount > 0 &&
@@ -412,7 +411,7 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
       await serviceM8Api.post('/companycontact.json', {
         company_uuid: companyUuid,
         first: firstName,
-        last: lastName,
+        lastName: lastName,
         email: email,
         phone: phone,
       });
@@ -496,7 +495,7 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
       );
     }
 
-    // Download and upload images to ServiceM8
+    // Download and upload images to ServiceM8 as notes
     for (const photo of photoData) {
       const { url: photoUrl, documentId, filename, mimetype } = photo;
       let tempPath;
@@ -555,41 +554,37 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
           continue;
         }
 
-        const uploadJobAttachment = async (attempt = 1) => {
+        const uploadNote = async (attempt = 1) => {
           try {
-            const jobForm = new FormData();
-            jobForm.append('related_object', 'job');
-            jobForm.append('related_object_uuid', jobUuid);
-            jobForm.append('attachment_name', filename);
-            jobForm.append('file_type', mimetype);
-            jobForm.append('attachment', fs.createReadStream(tempPath), { filename, contentType: mimetype });
+            const noteForm = new FormData();
+            noteForm.append('related_object', 'job');
+            noteForm.append('related_object_uuid', jobUuid);
+            noteForm.append('body', `Image from GHL: ${filename}`);
+            noteForm.append('attachment', fs.createReadStream(tempPath), { filename, contentType: mimetype });
 
-            const jobAttachmentResponse = await serviceM8Api.post('/Attachment.json', jobForm, {
-              headers: {
-                ...jobForm.getHeaders(),
-                'Content-Type': `multipart/form-data; boundary=${jobForm.getBoundary()}`,
-              },
+            const noteResponse = await serviceM8Api.post('/note.json', noteForm, {
+              headers: noteForm.getHeaders(),
             });
 
             console.log(
-              `Image added to job ${jobUuid} as attachment from URL ${photoUrl}, attachment UUID: ${
-                jobAttachmentResponse.headers['x-record-uuid']
+              `Note with image added to job ${jobUuid} from URL ${photoUrl}, note UUID: ${
+                noteResponse.headers['x-record-uuid']
               }`
             );
           } catch (error) {
             console.error(
-              `Attempt ${attempt} failed to upload job attachment for ${photoUrl}:`,
+              `Attempt ${attempt} failed to upload note for ${photoUrl}:`,
               error.response ? error.response.data : error.message
             );
             if (attempt < 2) {
-              console.log(`Retrying job attachment upload for ${photoUrl}...`);
-              await uploadJobAttachment(attempt + 1);
+              console.log(`Retrying note upload for ${photoUrl}...`);
+              await uploadNote(attempt + 1);
             } else {
               throw error;
             }
           }
         };
-        await uploadJobAttachment();
+        await uploadNote();
 
         const uploadCompanyAttachment = async (attempt = 1) => {
           try {
