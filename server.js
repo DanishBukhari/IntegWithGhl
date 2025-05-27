@@ -399,6 +399,17 @@ const checkPaymentStatus = async () => {
   }
 };
 
+// Helper function to get file extension from MIME type
+function getFileExtensionFromMime(mime) {
+  const mimeToExt = {
+    'image/png': '.png',
+    'image/jpeg': '.jpg',
+    'image/gif': '.gif',
+    'application/pdf': '.pdf',
+  };
+  return mimeToExt[mime.toLowerCase()] || '.dat';
+}
+
 // Endpoint for GHL to create a job in ServiceM8
 app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
   try {
