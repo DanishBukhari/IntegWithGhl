@@ -637,13 +637,13 @@ for (const photo of photoData) {
     console.log(`Uploaded file for attachment ${attachmentUuid}`);
 
     // Create a note
-    const noteData = {
-      related_object: 'job',
-      related_object_uuid: jobUuid,
-      body: `Image uploaded from GHL: ${filename}`,
-    };
-    const noteResponse = await serviceM8Api.post('/note.json', noteData);
-    console.log(`Note added to job ${jobUuid}, note UUID: ${noteResponse.headers['x-record-uuid']}`);
+    // const noteData = {
+    //   related_object: 'job',
+    //   related_object_uuid: jobUuid,
+    //   body: `Image uploaded from GHL: ${filename}`,
+    // };
+    // const noteResponse = await serviceM8Api.post('/note.json', noteData);
+    // console.log(`Note added to job ${jobUuid}, note UUID: ${noteResponse.headers['x-record-uuid']}`);
 
     // For verification, skip cleanup temporarily
     // await fsPromises.unlink(tempPath);
