@@ -468,7 +468,7 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
       await serviceM8Api.post('/companycontact.json', {
         company_uuid: companyUuid,
         first: firstName,
-        lastName: lastName,
+        lastName: lastName, // Ensure lastName is included
         email: email,
         phone: phone,
       });
@@ -476,182 +476,182 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
       console.log(`Contact added for client: ${companyUuid}`);
     }
 
-    // Create a new job in ServiceM8
+    // Create a new job in ServiceM8 with address in description
+    const jobDescriptionWithAddress = address
+      ? `Address: ${address}\nGHL Contact ID: ${ghlContactId}\n${jobDescription || ''}`
+      : `GHL Contact ID: ${ghlContactId}\n${jobDescription || ''}`;
     const jobData = {
       company_uuid: companyUuid,
       status: 'Quote',
       queue_uuid: queueUuid,
-      job_description: `GHL Contact ID: ${ghlContactId}\n${jobDescription || ''}`,
+      job_description: jobDescriptionWithAddress,
     };
 
     const jobResponse = await serviceM8Api.post('/job.json', jobData);
     const jobUuid = jobResponse.headers['x-record-uuid'];
     console.log(`Job created: ${jobUuid} in queue ${queueUuid}`);
 
-    // Fetch images from GHL /contacts/{id} with fallbacks
-let photoData = [];
-try {
-  const contactResponse = await ghlApi.get(`/contacts/${ghlContactId}`);
-  const contact = contactResponse.data.contact;
-  console.log(`Fetched GHL contact data for ${ghlContactId}`);
+    // Create job contact in ServiceM8
+    await serviceM8Api.post('/jobcontact.json', {
+      job_uuid: jobUuid,
+      first: firstName,
+      lastName: lastName, // Ensure lastName is included
+      email: email,
+      phone: phone,
+    });
+    console.log(`Job contact added for job: ${jobUuid}`);
 
-  if (contact.customField) {
-    for (const field of contact.customField) {
-      if (field.value && typeof field.value === 'object' && !Array.isArray(field.value)) {
-        for (const [uuid, entry] of Object.entries(field.value)) {
-          if (
-            entry.url &&
-            entry.meta &&
-            entry.meta.mimetype &&
-            entry.meta.mimetype.match(/image\/(png|jpeg|jpg)/i)
-          ) {
-            const fileExtension = getFileExtensionFromMime(entry.meta.mimetype);
-             photoData.push({
-              url: entry.url,
-              documentId: entry.documentId,
-              filename: entry.meta.originalname || `photo-${uuid}-${Date.now()}${fileExtension}`,
-              mimetype: entry.meta.mimetype,
-            });
+    // Fetch images from GHL /contacts/{id} with fallbacks
+    let photoData = [];
+    try {
+      const contactResponse = await ghlApi.get(`/contacts/${ghlContactId}`);
+      const contact = contactResponse.data.contact;
+      console.log(`Fetched GHL contact data for ${ghlContactId}`);
+
+      if (contact.customField) {
+        for (const field of contact.customField) {
+          if (field.value && typeof field.value === 'object' && !Array.isArray(field.value)) {
+            for (const [uuid, entry] of Object.entries(field.value)) {
+              if (
+                entry.url &&
+                entry.meta &&
+                entry.meta.mimetype &&
+                entry.meta.mimetype.match(/image\/(png|jpeg|jpg)/i)
+              ) {
+                const fileExtension = getFileExtensionFromMime(entry.meta.mimetype);
+                photoData.push({
+                  url: entry.url,
+                  documentId: entry.documentId,
+                  filename: entry.meta.originalname || `photo-${uuid}-${Date.now()}${fileExtension}`,
+                  mimetype: entry.meta.mimetype,
+                });
+              }
+            }
           }
         }
+      } else {
+        console.log(`No customField found in GHL contact ${ghlContactId}. Available properties: ${Object.keys(contact)}`);
       }
-    }
-  } else {
-    console.log(`No customField found in GHL contact ${ghlContactId}. Available properties: ${Object.keys(contact)}`);
-  }
 
-  if (photoData.length === 0) {
-    try {
-      const attachmentsResponse = await ghlApi.get(`/contacts/${ghlContactId}/attachments`);
-      const attachments = attachmentsResponse.data.attachments || [];
-      console.log(`Fetched ${attachments.length} attachments from GHL contact ${ghlContactId}`);
+      if (photoData.length === 0) {
+        try {
+          const attachmentsResponse = await ghlApi.get(`/contacts/${ghlContactId}/attachments`);
+          const attachments = attachmentsResponse.data.attachments || [];
+          console.log(`Fetched ${attachments.length} attachments from GHL contact ${ghlContactId}`);
 
-      for (const attachment of attachments) {
-        if (
-          attachment.url &&
-          attachment.mimetype &&
-          attachment.mimetype.match(/image\/(png|jpeg|jpg)/i)
-        ) {
-          const fileExtension = getFileExtensionFromMime(attachment.mimetype);
-          photoData.push({
-            url: attachment.url,
-            documentId: attachment.documentId || attachment.url.split('/').pop(),
-            filename: attachment.filename || `attachment-${Date.now()}${fileExtension}`,
-            mimetype: attachment.mimetype,
-          });
+          for (const attachment of attachments) {
+            if (
+              attachment.url &&
+              attachment.mimetype &&
+              attachment.mimetype.match(/image\/(png|jpeg|jpg)/i)
+            ) {
+              const fileExtension = getFileExtensionFromMime(attachment.mimetype);
+              photoData.push({
+                url: attachment.url,
+                documentId: attachment.documentId || attachment.url.split('/').pop(),
+                filename: attachment.filename || `attachment-${Date.now()}${fileExtension}`,
+                mimetype: attachment.mimetype,
+              });
+            }
+          }
+        } catch (attachmentError) {
+          console.log('Attachments endpoint not available or failed:', attachmentError.response ? attachmentError.response.data : attachmentError.message);
         }
       }
-    } catch (attachmentError) {
-      console.log('Attachments endpoint not available or failed:', attachmentError.response ? attachmentError.response.data : attachmentError.message);
+
+      console.log(`Fetched ${photoData.length} photos for contact ${ghlContactId}:`, photoData.map(p => p.url));
+    } catch (error) {
+      console.error(
+        'Error fetching GHL contact images:',
+        error.response ? error.response.data : error.message
+      );
     }
-  }
 
-  console.log(`Fetched ${photoData.length} photos for contact ${ghlContactId}:`, photoData.map(p => p.url));
-} catch (error) {
-  console.error(
-    'Error fetching GHL contact images:',
-    error.response ? error.response.data : error.message
-  );
-}
+    // Download and upload images to ServiceM8
+    for (const photo of photoData) {
+      const { url: photoUrl, documentId, filename, mimetype } = photo;
+      let tempPath;
+      let attachmentUuid;
 
-// Download and upload images to ServiceM8
-for (const photo of photoData) {
-  const { url: photoUrl, documentId, filename, mimetype } = photo;
-  let tempPath;
-  let attachmentUuid;
-
-  try {
-    tempPath = path.join(UPLOADS_DIR, filename);
-    console.log(`Downloading image from ${photoUrl} to ${tempPath}`);
-    let downloadResponse;
-
-    try {
-      downloadResponse = await axios.get(`https://services.leadconnectorhq.com/documents/download/${documentId}`, {
-        headers: {
-          Authorization: `Bearer ${GHL_API_KEY}`,
-        },
-        responseType: 'stream',
-      });
-    } catch (primaryError) {
-      console.log(`Primary download failed for ${photoUrl}:`, primaryError.response ? primaryError.response.data : primaryError.message);
       try {
-        downloadResponse = await axios.get(photoUrl, {
-          headers: {
-            Authorization: `Bearer ${GHL_API_KEY}`,
-          },
-          responseType: 'stream',
+        tempPath = path.join(UPLOADS_DIR, filename);
+        console.log(`Downloading image from ${photoUrl} to ${tempPath}`);
+        let downloadResponse;
+
+        try {
+          downloadResponse = await axios.get(`https://services.leadconnectorhq.com/documents/download/${documentId}`, {
+            headers: {
+              Authorization: `Bearer ${GHL_API_KEY}`,
+            },
+            responseType: 'stream',
+          });
+        } catch (primaryError) {
+          console.log(`Primary download failed for ${photoUrl}:`, primaryError.response ? primaryError.response.data : primaryError.message);
+          try {
+            downloadResponse = await axios.get(photoUrl, {
+              headers: {
+                Authorization: `Bearer ${GHL_API_KEY}`,
+              },
+              responseType: 'stream',
+            });
+          } catch (fallbackError) {
+            console.error(`Fallback download failed for ${photoUrl}:`, fallbackError.response ? fallbackError.response.data : fallbackError.message);
+            continue;
+          }
+        }
+
+        const contentType = downloadResponse.headers['content-type'] || '';
+        if (!contentType.match(/image\/(png|jpeg|jpg)/i)) {
+          console.log(`Skipping non-image URL ${photoUrl}: Content-Type ${contentType}`);
+          continue;
+        }
+
+        const writer = fs.createWriteStream(tempPath);
+        downloadResponse.data.pipe(writer);
+
+        await new Promise((resolve, reject) => {
+          writer.on('finish', resolve);
+          writer.on('error', reject);
         });
-      } catch (fallbackError) {
-        console.error(`Fallback download failed for ${photoUrl}:`, fallbackError.response ? fallbackError.response.data : fallbackError.message);
-        continue;
+
+        const stats = await fsPromises.stat(tempPath);
+        console.log(`Downloaded image to ${tempPath}, size: ${stats.size} bytes`);
+        if (stats.size === 0) {
+          console.error(`Downloaded file ${tempPath} is empty`);
+          continue;
+        }
+
+        try {
+          await fsPromises.access(tempPath, fs.constants.R_OK);
+        } catch (error) {
+          console.error(`File ${tempPath} is not accessible:`, error.message);
+          continue;
+        }
+
+        // Create attachment record
+        const fileExtension = getFileExtensionFromMime(mimetype);
+        const attachmentData = {
+          related_object: 'job',
+          related_object_uuid: jobUuid,
+          attachment_name: filename,
+          file_type: fileExtension,
+        };
+        const attachmentResponse = await serviceM8Api.post('/Attachment.json', attachmentData);
+        attachmentUuid = attachmentResponse.headers['x-record-uuid'];
+        console.log(`Created attachment record for job ${jobUuid}, UUID: ${attachmentUuid}, file_type: ${fileExtension}`);
+
+        // Upload the file
+        const fileData = await fsPromises.readFile(tempPath);
+        await serviceM8Api.put(`/Attachment/${attachmentUuid}.file`, fileData, {
+          headers: {
+            'Content-Type': 'application/octet-stream',
+          },
+        });
+        console.log(`Uploaded file for attachment ${attachmentUuid}`);
+      } catch (error) {
+        console.error(`Error processing image ${filename}:`, error.message);
       }
     }
-
-    const contentType = downloadResponse.headers['content-type'] || '';
-    if (!contentType.match(/image\/(png|jpeg|jpg)/i)) {
-      console.log(`Skipping non-image URL ${photoUrl}: Content-Type ${contentType}`);
-      continue;
-    }
-
-    const writer = fs.createWriteStream(tempPath);
-    downloadResponse.data.pipe(writer);
-
-    await new Promise((resolve, reject) => {
-      writer.on('finish', resolve);
-      writer.on('error', reject);
-    });
-
-    const stats = await fsPromises.stat(tempPath);
-    console.log(`Downloaded image to ${tempPath}, size: ${stats.size} bytes`);
-    if (stats.size === 0) {
-      console.error(`Downloaded file ${tempPath} is empty`);
-      continue;
-    }
-
-    try {
-      await fsPromises.access(tempPath, fs.constants.R_OK);
-    } catch (error) {
-      console.error(`File ${tempPath} is not accessible:`, error.message);
-      continue;
-    }
-
-    // Create attachment record
-    const fileExtension = getFileExtensionFromMime(mimetype);
-    const attachmentData = {
-      related_object: 'job',
-      related_object_uuid: jobUuid,
-      attachment_name: filename,
-      file_type: fileExtension,
-    };
-    const attachmentResponse = await serviceM8Api.post('/Attachment.json', attachmentData);
-    attachmentUuid = attachmentResponse.headers['x-record-uuid'];
-    console.log(`Created attachment record for job ${jobUuid}, UUID: ${attachmentUuid}, file_type: ${fileExtension}`);
-
-    // Upload the file
-    const fileData = await fsPromises.readFile(tempPath);
-    await serviceM8Api.put(`/Attachment/${attachmentUuid}.file`, fileData, {
-      headers: {
-        'Content-Type': 'application/octet-stream',
-      },
-    });
-    console.log(`Uploaded file for attachment ${attachmentUuid}`);
-
-    // Create a note
-    // const noteData = {
-    //   related_object: 'job',
-    //   related_object_uuid: jobUuid,
-    //   body: `Image uploaded from GHL: ${filename}`,
-    // };
-    // const noteResponse = await serviceM8Api.post('/note.json', noteData);
-    // console.log(`Note added to job ${jobUuid}, note UUID: ${noteResponse.headers['x-record-uuid']}`);
-
-    // For verification, skip cleanup temporarily
-    // await fsPromises.unlink(tempPath);
-    // console.log(`Cleaned up temporary file ${tempPath}`);
-  } catch (error) {
-    console.error(`Error processing image ${filename}:`, error.message);
-  }
-}
 
     console.log(`Job creation completed for job ${jobUuid}`);
     res.status(200).json({ message: 'Job created successfully', jobUuid });
@@ -660,7 +660,6 @@ for (const photo of photoData) {
     res.status(500).json({ error: 'Failed to create job' });
   }
 });
-
 // Temporary endpoints for testing
 app.get('/test-payment-check', async (req, res) => {
   console.log('Triggering test payment check...');
