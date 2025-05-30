@@ -496,7 +496,7 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
     // Create job contact in ServiceM8
     await serviceM8Api.post('/jobcontact.json', {
       job_uuid: jobUuid,
-      type: 'primary', // Required field to specify contact type
+      type: 'Job Contact', // Required field to specify contact type
       first: firstName,
       last: lastName,
       email: email,
