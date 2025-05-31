@@ -478,22 +478,22 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
 
     // Create a new job in ServiceM8
     // Create a new job in ServiceM8 with address and message
-    //  let message = '';
+     let Message = '';
     try {
       const contactResponse = await ghlApi.get(`/contacts/${ghlContactId}`);
       const contact = contactResponse.data.contact;
       console.log(`Fetched GHL contact data for ${ghlContactId}`);
 
       // Assuming custom fields are in contact.customFields as an array
-      const messageField = contact.customFields.find(field => field.name === 'message');
+      const messageField = contact.customFields.find(field => field.name === 'Message');
       if (messageField) {
-        message = messageField.value;
+        Message = messageField.value;
       }
     } catch (error) {
       console.error('Error fetching contact message from GHL:', error.response ? error.response.data : error.message);
     }
-     const jobDescriptionWithMessage = message
-      ? `Message: ${message}\nGHL Contact ID: ${ghlContactId}\n${jobDescription || ''}`
+     const jobDescriptionWithMessage = Message
+      ? `Message: ${Message}\nGHL Contact ID: ${ghlContactId}\n${jobDescription || ''}`
       : `GHL Contact ID: ${ghlContactId}\n${jobDescription || ''}`;
     const jobData = {
       company_uuid: companyUuid,
