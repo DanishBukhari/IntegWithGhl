@@ -484,22 +484,28 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
       const contact = contactResponse.data.contact;
       console.log(`Fetched GHL contact data for ${ghlContactId}`);
 
-      // Check for customFields and find the message field
-      if (contact.customFields && Array.isArray(contact.customFields)) {
-        const messageField = contact.customFields.find(field => field.name === 'Message');
-        if (messageField && messageField.value) {
-          Message = messageField.value;
-          console.log(`Message retrieved for contact ${ghlContactId}: $Message}`);
-        } else {
-          console.log(`No message found for contact ${ghlContactId}`);
-        }
-      } else {
-        console.log(`No customFields available for contact ${ghlContactId}`);
-      }
-    } catch (error) {
-      // Log the error but don't throw; message is optional
-      console.error('Failed to fetch contact message from GHL (proceeding without message):', error.response ? error.response.data : error.message);
+       let customFields = contact.customFields || contact.custom_field_values || contact.fields || [];
+  if (!Array.isArray(customFields)) {
+    console.log(`Custom fields not an array, attempting to convert object:`, customFields);
+    customFields = Object.values(customFields).filter(f => f && typeof f === 'object');
+  }
+
+  if (customFields.length > 0) {
+    const messageField = customFields.find(field => 
+      field.name === 'Message' || field.label === 'Message' || field.id === 'message'
+    );
+    if (messageField && (messageField.value || messageField.values)) {
+      Message = messageField.value || messageField.values[0] || '';
+      console.log(`Message retrieved for contact ${ghlContactId}: ${Message}`);
+    } else {
+      console.log(`No message field found in customFields for contact ${ghlContactId}:`, customFields);
     }
+  } else {
+    console.log(`No customFields available or accessible for contact ${ghlContactId}`);
+  }
+} catch (error) {
+  console.error('Failed to fetch contact message from GHL (proceeding without message):', error.response ? error.response.data : error.message);
+}
      const jobDescriptionWithMessage = Message
       ? `Message: ${Message}\nGHL Contact ID: ${ghlContactId}\n${jobDescription || ''}`
       : `GHL Contact ID: ${ghlContactId}\n${jobDescription || ''}`;
