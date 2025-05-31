@@ -478,42 +478,51 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
 
     // Create a new job in ServiceM8
     // Create a new job in ServiceM8 with address and message
-       let Message = '';
+          let message = '';
     try {
-      const contactResponse = await ghlApi.get(`/contacts/${ghlContactId}`);
+      const contactResponse = await ghlApi.get(`/contacts/${ghlContactId}`, {
+        params: { include: 'customFields' }, // Explicitly request custom fields
+      });
       const contact = contactResponse.data.contact;
-      console.log(`Fetched GHL contact data for ${ghlContactId}`);
+      console.log(`Fetched GHL contact data for ${ghlContactId}:`, JSON.stringify(contact, null, 2));
 
-       let customFields = contact.customFields || contact.custom_field_values || contact.fields || [];
-  if (!Array.isArray(customFields)) {
-    console.log(`Custom fields not an array, attempting to convert object:`, customFields);
-    customFields = Object.values(customFields).filter(f => f && typeof f === 'object');
-  }
+      // Check for various possible keys for custom fields
+      let customFields = contact.customFields || contact.custom_fields || contact.customField || contact.custom_field_values || contact.fields || [];
+      if (!Array.isArray(customFields)) {
+        console.log(`Custom fields not an array, attempting to convert object:`, customFields);
+        customFields = Object.values(customFields).filter(f => f && typeof f === 'object');
+      }
 
-  if (customFields.length > 0) {
-    const messageField = customFields.find(field => 
-      field.name === 'Message' || field.label === 'Message' || field.id === 'message'
-    );
-    if (messageField && (messageField.value || messageField.values)) {
-      Message = messageField.value || messageField.values[0] || '';
-      console.log(`Message retrieved for contact ${ghlContactId}: ${Message}`);
-    } else {
-      console.log(`No message field found in customFields for contact ${ghlContactId}:`, customFields);
+      if (customFields.length > 0) {
+        // Look for the "Message" field (case-sensitive and case-insensitive)
+        const messageField = customFields.find(field => 
+          (field.name && (field.name === 'Message' || field.name === 'message')) ||
+          (field.label && (field.label === 'Message' || field.label === 'message')) ||
+          (field.id && (field.id === 'Message' || field.id === 'message'))
+        );
+        if (messageField && (messageField.value || messageField.values)) {
+          message = messageField.value || (messageField.values && messageField.values[0]) || '';
+          console.log(`Message retrieved for contact ${ghlContactId}: ${message}`);
+        } else {
+          console.log(`No Message field found in customFields for contact ${ghlContactId}:`, customFields);
+        }
+      } else {
+        console.log(`No customFields available or accessible for contact ${ghlContactId}`);
+      }
+    } catch (error) {
+      console.error('Failed to fetch contact message from GHL (proceeding without message):', error.response ? error.response.data : error.message);
     }
-  } else {
-    console.log(`No customFields available or accessible for contact ${ghlContactId}`);
-  }
-} catch (error) {
-  console.error('Failed to fetch contact message from GHL (proceeding without message):', error.response ? error.response.data : error.message);
-}
-     const jobDescriptionWithMessage = Message
-      ? `Message: ${Message}\nGHL Contact ID: ${ghlContactId}\n${jobDescription || ''}`
+
+    // Build job description, including message only if available
+    const jobDescriptionWithMessage = message
+      ? `Message: ${message}\nGHL Contact ID: ${ghlContactId}\n${jobDescription || ''}`
       : `GHL Contact ID: ${ghlContactId}\n${jobDescription || ''}`;
+
     const jobData = {
       company_uuid: companyUuid,
       status: 'Quote',
       queue_uuid: queueUuid,
-      job_address: address, // Set job address field
+      job_address: address, // Keep job address field
       job_description: jobDescriptionWithMessage,
     };
 
