@@ -478,19 +478,27 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
 
     // Create a new job in ServiceM8
     // Create a new job in ServiceM8 with address and message
-     let Message = '';
+       let Message = '';
     try {
       const contactResponse = await ghlApi.get(`/contacts/${ghlContactId}`);
       const contact = contactResponse.data.contact;
       console.log(`Fetched GHL contact data for ${ghlContactId}`);
 
-      // Assuming custom fields are in contact.customFields as an array
-      const messageField = contact.customFields.find(field => field.name === 'Message');
-      if (messageField) {
-        Message = messageField.value;
+      // Check for customFields and find the message field
+      if (contact.customFields && Array.isArray(contact.customFields)) {
+        const messageField = contact.customFields.find(field => field.name === 'Message');
+        if (messageField && messageField.value) {
+          Message = messageField.value;
+          console.log(`Message retrieved for contact ${ghlContactId}: $Message}`);
+        } else {
+          console.log(`No message found for contact ${ghlContactId}`);
+        }
+      } else {
+        console.log(`No customFields available for contact ${ghlContactId}`);
       }
     } catch (error) {
-      console.error('Error fetching contact message from GHL:', error.response ? error.response.data : error.message);
+      // Log the error but don't throw; message is optional
+      console.error('Failed to fetch contact message from GHL (proceeding without message):', error.response ? error.response.data : error.message);
     }
      const jobDescriptionWithMessage = Message
       ? `Message: ${Message}\nGHL Contact ID: ${ghlContactId}\n${jobDescription || ''}`
