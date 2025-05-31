@@ -478,7 +478,7 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
 
     // Create a new job in ServiceM8
     // Create a new job in ServiceM8 with address and message
-          let message = '';
+      let message = '';
     try {
       const contactResponse = await ghlApi.get(`/contacts/${ghlContactId}`, {
         params: { include: 'customFields' }, // Explicitly request custom fields
@@ -498,7 +498,7 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
         const messageField = customFields.find(field => 
           (field.name && (field.name === 'Message' || field.name === 'message')) ||
           (field.label && (field.label === 'Message' || field.label === 'message')) ||
-          (field.id && (field.id === 'Message' || field.id === 'message'))
+          (field.id && (field.id === 'J2Bl5y1wz6iBQEyC4wtY' || field.id === 'J2Bl5y1wz6iBQEyC4wtY'))
         );
         if (messageField && (messageField.value || messageField.values)) {
           message = messageField.value || (messageField.values && messageField.values[0]) || '';
@@ -517,12 +517,11 @@ app.post('/ghl-create-job', upload.array('photos'), async (req, res) => {
     const jobDescriptionWithMessage = message
       ? `Message: ${message}\nGHL Contact ID: ${ghlContactId}\n${jobDescription || ''}`
       : `GHL Contact ID: ${ghlContactId}\n${jobDescription || ''}`;
-
     const jobData = {
       company_uuid: companyUuid,
       status: 'Quote',
       queue_uuid: queueUuid,
-      job_address: address, // Keep job address field
+      job_address: address, // Set job address field
       job_description: jobDescriptionWithMessage,
     };
 
